@@ -461,11 +461,16 @@ def _layout_directory_entries(entries, is_index=False):
     rows_per_page = rows_per_column * 2
 
     placements = []
+    row_cursor = 0
     for idx, entry in enumerate(entries):
-        per_page_index = idx % rows_per_page
-        page_index = idx // rows_per_page
-        col_index = per_page_index // rows_per_column
-        row_index = per_page_index % rows_per_column
+        row_span = 2 if (is_index and _should_wrap_index_pages(entry)) else 1
+        if (row_cursor % rows_per_column) + row_span > rows_per_column:
+            row_cursor += rows_per_column - (row_cursor % rows_per_column)
+
+        per_page_row = row_cursor % rows_per_page
+        page_index = row_cursor // rows_per_page
+        col_index = per_page_row // rows_per_column
+        row_index = per_page_row % rows_per_column
 
         column_left = column_lefts[col_index]
         column_right = column_left + column_width
@@ -473,25 +478,32 @@ def _layout_directory_entries(entries, is_index=False):
         y = title_y - 0.45 * inch - row_index * row_height
         desc_x = column_left + (0 if is_index else entry["indent_level"] * indent_step)
         page_x = column_right - 4
-        page_left_x = column_right - (0.62 * inch)
+        page_column_width = (1.35 * inch) if is_index else (0.62 * inch)
+        item_column_width = 0.9 * inch if is_index else 1.05 * inch
+        page_left_x = column_right - page_column_width
         item_x = page_left_x - 8
-        item_left_x = item_x - (1.05 * inch)
+        item_left_x = item_x - item_column_width
 
         placements.append(
             {
                 "entry_index": idx,
                 "page_index": page_index,
+                "column_left": column_left,
                 "desc_x": desc_x,
                 "item_x": item_x,
                 "item_left_x": item_left_x,
                 "page_x": page_x,
                 "page_left_x": page_left_x,
                 "y": y,
+                "page_y": y - row_height if row_span > 1 else y,
                 "title_y": title_y,
+                "row_span": row_span,
             }
         )
+        row_cursor += row_span
 
-    total_pages = (len(entries) + rows_per_page - 1) // rows_per_page if entries else 1
+    total_rows = row_cursor if row_cursor > 0 else 1
+    total_pages = (total_rows + rows_per_page - 1) // rows_per_page
     return page_size, placements, total_pages
 
 
@@ -511,6 +523,17 @@ def _trim_text_to_width(text, font_name, font_size, max_width):
     while trimmed and pdfmetrics.stringWidth(trimmed, font_name, font_size) > available:
         trimmed = trimmed[:-1]
     return f"{trimmed}{ellipsis}"
+
+
+def _index_page_count(entry):
+    page_text = (entry.get("page_text") or "").strip()
+    if page_text:
+        return len([part for part in page_text.split(",") if part.strip()])
+    return len(entry.get("toc_indices") or [])
+
+
+def _should_wrap_index_pages(entry):
+    return _index_page_count(entry) >= 4
 
 
 def create_directory_pdf_bytes(entries, title, page_offset_map=None, is_index=False):
@@ -541,12 +564,11 @@ def create_directory_pdf_bytes(entries, title, page_offset_map=None, is_index=Fa
 
         desc = entry["desc"]
         item_number = (entry.get("item_number") or "").strip()
-        item_numbers = entry.get("item_numbers") or []
 
         if is_hydraulic_schematic_entry(desc):
             display_item = ""
         elif is_index:
-            display_item = ", ".join(item_numbers)
+            display_item = (entry.get("part") or "").strip()
         else:
             display_item = item_number
 
@@ -572,7 +594,16 @@ def create_directory_pdf_bytes(entries, title, page_offset_map=None, is_index=Fa
             c.drawRightString(placement["item_x"], placement["y"], item_text)
 
         if page_num:
-            c.drawRightString(placement["page_x"], placement["y"], page_num)
+            if is_index and placement.get("row_span", 1) > 1:
+                c.drawRightString(placement["page_x"], placement["page_y"], page_num)
+            else:
+                page_text = _trim_text_to_width(
+                    page_num,
+                    toc_font_regular,
+                    8,
+                    placement["page_x"] - placement["page_left_x"],
+                )
+                c.drawRightString(placement["page_x"], placement["y"], page_text)
 
     if current_page == -1:
         draw_header(page_size[1] - (0.75 * 72))
