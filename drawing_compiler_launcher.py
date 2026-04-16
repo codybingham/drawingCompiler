@@ -1629,7 +1629,9 @@ class DrawingCompilerStudio(tk.Tk):
 
         def collapse_all() -> None:
             for item in self.reorder_tree.get_children():
-                self.reorder_tree.item(item, open=False)
+                self.reorder_tree.item(item, open=True)
+                for child in self.reorder_tree.get_children(item):
+                    self.reorder_tree.item(child, open=False)
 
         ttk.Button(tools, text="Open Structure", command=open_file).pack(side="left")
         ttk.Button(tools, text="Save As", command=save_file).pack(side="left", padx=(8, 0))

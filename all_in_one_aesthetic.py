@@ -1844,12 +1844,12 @@ class DrawingCompilerStudio(tk.Tk):
     def _reorder_expand(self, expand):
         if not self._reorder_tree_available():
             return
-        def toggle(item):
-            self.reorder_tree.item(item, open=expand)
+        def toggle(item, force_open=False):
+            self.reorder_tree.item(item, open=(True if force_open else expand))
             for child in self.reorder_tree.get_children(item):
                 toggle(child)
         for item in self.reorder_tree.get_children():
-            toggle(item)
+            toggle(item, force_open=not expand)
 
     # ── Reference Download ────────────────────────────────────────────────────
 
