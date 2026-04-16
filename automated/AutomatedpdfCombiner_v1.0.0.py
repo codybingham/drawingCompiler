@@ -423,12 +423,16 @@ def _build_index_entries(toc_entries):
             grouped[key] = {
                 "desc": entry["desc"].strip(),
                 "part": "",
+                "item_numbers": [],
                 "indent_level": 0,
                 "toc_indices": [],
             }
         part = (entry.get("part") or "").strip()
         if part and not grouped[key]["part"]:
             grouped[key]["part"] = part
+        item_number = (entry.get("item_number") or "").strip()
+        if item_number and not is_hydraulic_schematic_entry(entry["desc"]) and item_number not in grouped[key]["item_numbers"]:
+            grouped[key]["item_numbers"].append(item_number)
         grouped[key]["toc_indices"].append(entry["toc_index"])
 
     return sorted(grouped.values(), key=lambda entry: entry["desc"].casefold())
@@ -536,6 +540,18 @@ def create_directory_pdf_bytes(entries, title, page_offset_map=None, is_index=Fa
         desc = entry["desc"]
         part = entry["part"]
         display_part = part if part and not is_hydraulic_schematic_entry(desc) else ""
+        item_number = (entry.get("item_number") or "").strip()
+        item_numbers = entry.get("item_numbers") or []
+
+        if is_hydraulic_schematic_entry(desc):
+            item_prefix = ""
+        elif is_index:
+            item_prefix = ", ".join(item_numbers)
+        else:
+            item_prefix = item_number
+
+        if item_prefix:
+            desc = f"{desc} - {item_prefix}"
 
         entry_index = placement["entry_index"]
         page_num = ""
@@ -585,7 +601,7 @@ def _add_internal_link_annotation(writer, from_page_index, target_page_index, re
     writer.add_annotation(from_page_index, annotation)
 
 
-def add_toc_hyperlinks(writer, toc_placements, effective_page_map, line_height=12):
+def add_toc_hyperlinks(writer, toc_placements, effective_page_map, source_page_offset=0, line_height=12):
     for placement in toc_placements:
         entry_index = placement["entry_index"]
         target_page = effective_page_map[entry_index]
@@ -594,7 +610,7 @@ def add_toc_hyperlinks(writer, toc_placements, effective_page_map, line_height=1
 
         _add_internal_link_annotation(
             writer,
-            from_page_index=placement["page_index"],
+            from_page_index=placement["page_index"] + source_page_offset,
             target_page_index=target_page,
             rect=[
                 placement["desc_x"] - 2,
@@ -605,7 +621,7 @@ def add_toc_hyperlinks(writer, toc_placements, effective_page_map, line_height=1
         )
 
 
-def add_index_hyperlinks(writer, index_placements, index_target_map, line_height=12):
+def add_index_hyperlinks(writer, index_placements, index_target_map, source_page_offset=0, line_height=12):
     for placement in index_placements:
         entry_index = placement["entry_index"]
         target_page = index_target_map[entry_index]
@@ -614,7 +630,7 @@ def add_index_hyperlinks(writer, index_placements, index_target_map, line_height
 
         _add_internal_link_annotation(
             writer,
-            from_page_index=placement["page_index"],
+            from_page_index=placement["page_index"] + source_page_offset,
             target_page_index=target_page,
             rect=[
                 placement["desc_x"] - 2,
@@ -752,6 +768,24 @@ def build_effective_page_map(toc_entries, direct_page_map):
                 break
 
     return effective
+
+
+def build_page_maps(toc_entries, drawings_folder, toc_pages, index_pages):
+    direct_page_map = [None] * len(toc_entries)
+    current_page = toc_pages + index_pages
+
+    for i, entry in enumerate(toc_entries):
+        filename = entry.get("filename")
+        if not filename:
+            continue
+
+        fpath = os.path.join(drawings_folder, filename)
+        if os.path.exists(fpath):
+            reader = PdfReader(fpath)
+            direct_page_map[i] = current_page
+            current_page += len(reader.pages)
+
+    return direct_page_map, build_effective_page_map(toc_entries, direct_page_map)
 
 
 # ---------------------------------------------------------------------------
@@ -1452,6 +1486,7 @@ def main():
             {
                 "code_text": code_text,
                 "code_tuple": code_tuple,
+                "item_number": "" if code_text == "1" else code_text,
                 "desc": desc,
                 "part": part,
                 "filename": filename,
@@ -1462,26 +1497,10 @@ def main():
     for i, entry in enumerate(toc_entries):
         entry["toc_index"] = i
 
-    direct_page_map = [None] * len(toc_entries)
-
     toc_packet, _, toc_pages = create_directory_pdf_bytes(toc_entries, "Table of Contents", None)
     index_entries = _build_index_entries(toc_entries)
     index_packet, _, index_pages = create_directory_pdf_bytes(index_entries, "Index", None, is_index=True)
-
-    current_page = toc_pages + index_pages
-
-    for i, entry in enumerate(toc_entries):
-        filename = entry.get("filename")
-        if not filename:
-            continue
-
-        fpath = os.path.join(drawings_folder, filename)
-        if os.path.exists(fpath):
-            reader = PdfReader(fpath)
-            direct_page_map[i] = current_page
-            current_page += len(reader.pages)
-
-    effective_page_map = build_effective_page_map(toc_entries, direct_page_map)
+    _, effective_page_map = build_page_maps(toc_entries, drawings_folder, toc_pages, index_pages)
 
     toc_packet, toc_placements, _ = create_directory_pdf_bytes(
         toc_entries,
@@ -1498,6 +1517,29 @@ def main():
     index_packet, index_placements, _ = create_directory_pdf_bytes(index_entries, "Index", None, is_index=True)
     toc_reader = PdfReader(toc_packet)
     index_reader = PdfReader(index_packet)
+
+    actual_toc_pages = len(toc_reader.pages)
+    actual_index_pages = len(index_reader.pages)
+    if actual_toc_pages != toc_pages or actual_index_pages != index_pages:
+        toc_pages = actual_toc_pages
+        index_pages = actual_index_pages
+        _, effective_page_map = build_page_maps(toc_entries, drawings_folder, toc_pages, index_pages)
+
+        toc_packet, toc_placements, _ = create_directory_pdf_bytes(
+            toc_entries,
+            "Table of Contents",
+            effective_page_map,
+        )
+        for entry in index_entries:
+            pages = []
+            for toc_index in entry["toc_indices"]:
+                page = effective_page_map[toc_index]
+                if page is not None and page not in pages:
+                    pages.append(page)
+            entry["page_text"] = ", ".join(str(page + 1) for page in pages)
+        index_packet, index_placements, _ = create_directory_pdf_bytes(index_entries, "Index", None, is_index=True)
+        toc_reader = PdfReader(toc_packet)
+        index_reader = PdfReader(index_packet)
 
     writer = PdfWriter()
 
@@ -1539,17 +1581,7 @@ def main():
         )
         bookmark_refs[i] = bookmark
 
-    add_toc_hyperlinks(writer, toc_placements, effective_page_map)
-    index_target_map = []
-    for entry in index_entries:
-        target_page = None
-        for toc_index in entry["toc_indices"]:
-            page = effective_page_map[toc_index]
-            if page is not None:
-                target_page = page
-                break
-        index_target_map.append(target_page)
-    add_index_hyperlinks(writer, index_placements, index_target_map)
+    add_toc_hyperlinks(writer, toc_placements, effective_page_map, source_page_offset=0)
 
     total_pages = len(writer.pages)
     for i, page in enumerate(writer.pages):
