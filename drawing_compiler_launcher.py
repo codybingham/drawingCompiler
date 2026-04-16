@@ -104,12 +104,13 @@ def is_hydraulic_schematic_entry(description: str) -> bool:
 
 def _build_index_entries(entries: list[dict]) -> list[dict]:
     grouped: dict[str, dict] = {}
-    for i, entry in enumerate(entries):
+    for entry in entries:
         key = entry["desc"].strip().casefold()
         if key not in grouped:
             grouped[key] = {
                 "desc": entry["desc"].strip(),
                 "part": "",
+                "item_numbers": [],
                 "indent_level": 0,
                 "toc_indices": [],
             }
@@ -117,13 +118,21 @@ def _build_index_entries(entries: list[dict]) -> list[dict]:
         part = str(entry.get("part") or "").strip()
         if part and not grouped[key]["part"]:
             grouped[key]["part"] = part
+        item_number = str(entry.get("item_number") or "").strip()
+        if item_number and not is_hydraulic_schematic_entry(entry["desc"]) and item_number not in grouped[key]["item_numbers"]:
+            grouped[key]["item_numbers"].append(item_number)
 
-        grouped[key]["toc_indices"].append(i)
+        grouped[key]["toc_indices"].append(entry["toc_index"])
 
     return sorted(grouped.values(), key=lambda e: e["desc"].casefold())
 
 
-def _layout_directory_entries(entries: list[dict], is_index: bool = False):
+def _layout_directory_entries(
+    entries: list[dict],
+    is_index: bool = False,
+    desc_font_name: str = "Helvetica",
+    desc_font_size: int = 8,
+):
     from reportlab.lib.pagesizes import letter, landscape
     from reportlab.lib.units import inch
 
@@ -144,35 +153,62 @@ def _layout_directory_entries(entries: list[dict], is_index: bool = False):
     rows_per_page = rows_per_column * 2
 
     placements = []
+    row_cursor = 0
     for idx, entry in enumerate(entries):
-        per_page_index = idx % rows_per_page
-        page_index = idx // rows_per_page
-        col_index = per_page_index // rows_per_column
-        row_index = per_page_index % rows_per_column
+        while True:
+            per_page_row = row_cursor % rows_per_page
+            page_index = row_cursor // rows_per_page
+            col_index = per_page_row // rows_per_column
+            row_index = per_page_row % rows_per_column
 
-        column_left = column_lefts[col_index]
-        column_right = column_left + column_width
-        title_y = height - margin_top
-        y = title_y - 0.45 * inch - row_index * row_height
-        desc_x = column_left + (0 if is_index else entry["indent_level"] * indent_step)
-        page_x = column_right - 4
-        page_left_x = column_right - (0.8 * inch)
-        part_x = page_left_x - 6
+            column_left = column_lefts[col_index]
+            column_right = column_left + column_width
+            title_y = height - margin_top
+            y = title_y - 0.45 * inch - row_index * row_height
+            desc_x = column_left + (0 if is_index else entry["indent_level"] * indent_step)
+            page_x = column_right - 4
+            page_column_width = (1.35 * inch) if is_index else (0.62 * inch)
+            item_column_width = 0.9 * inch if is_index else 1.05 * inch
+            page_left_x = column_right - page_column_width
+            item_x = page_left_x - 8
+            item_left_x = item_x - item_column_width
+
+            desc_right_limit = item_left_x - 8
+            desc_max_width = max(0, desc_right_limit - desc_x)
+            desc_lines = _wrap_text_to_width(entry["desc"], desc_font_name, desc_font_size, desc_max_width)
+
+            part_lines = []
+            if is_index:
+                part_text = str(entry.get("part") or "").strip()
+                if part_text:
+                    part_lines = _wrap_text_to_width(part_text, desc_font_name, desc_font_size, item_column_width)
+
+            row_span = max(len(desc_lines), len(part_lines), 1)
+            if (row_cursor % rows_per_column) + row_span > rows_per_column:
+                row_cursor += rows_per_column - (row_cursor % rows_per_column)
+                continue
+            break
 
         placements.append(
             {
                 "entry_index": idx,
                 "page_index": page_index,
                 "desc_x": desc_x,
-                "part_x": part_x,
+                "item_x": item_x,
+                "item_left_x": item_left_x,
                 "page_x": page_x,
                 "page_left_x": page_left_x,
                 "y": y,
                 "title_y": title_y,
+                "row_span": row_span,
+                "desc_lines": desc_lines,
+                "part_lines": part_lines,
             }
         )
+        row_cursor += row_span
 
-    total_pages = (len(entries) + rows_per_page - 1) // rows_per_page if entries else 1
+    total_rows = row_cursor if row_cursor > 0 else 1
+    total_pages = (total_rows + rows_per_page - 1) // rows_per_page
     return page_size, placements, total_pages
 
 
@@ -194,9 +230,55 @@ def _trim_text_to_width(text: str, font_name: str, font_size: int, max_width: fl
     return f"{trimmed}{ellipsis}"
 
 
+def _wrap_text_to_width(text: str, font_name: str, font_size: int, max_width: float) -> list[str]:
+    text = str(text or "")
+    if max_width <= 0:
+        return [text]
+    if not text:
+        return [""]
+
+    lines = []
+    current = ""
+    for word in text.split():
+        candidate = word if not current else f"{current} {word}"
+        if pdfmetrics.stringWidth(candidate, font_name, font_size) <= max_width:
+            current = candidate
+            continue
+
+        if current:
+            lines.append(current)
+            current = ""
+
+        if pdfmetrics.stringWidth(word, font_name, font_size) <= max_width:
+            current = word
+            continue
+
+        split_word = word
+        while split_word:
+            chunk = split_word
+            while chunk and pdfmetrics.stringWidth(chunk, font_name, font_size) > max_width:
+                chunk = chunk[:-1]
+            if not chunk:
+                lines.append(split_word[:1])
+                split_word = split_word[1:]
+            else:
+                lines.append(chunk)
+                split_word = split_word[len(chunk):]
+
+    if current:
+        lines.append(current)
+
+    return lines or [text]
+
+
 def create_directory_pdf_bytes(entries: list[dict], title: str, page_offset_map=None, is_index: bool = False):
     packet = BytesIO()
-    page_size, placements, _ = _layout_directory_entries(entries, is_index=is_index)
+    page_size, placements, _ = _layout_directory_entries(
+        entries,
+        is_index=is_index,
+        desc_font_name="Helvetica",
+        desc_font_size=8,
+    )
     c = canvas.Canvas(packet, pagesize=page_size)
     width, _ = page_size
 
@@ -217,8 +299,13 @@ def create_directory_pdf_bytes(entries: list[dict], title: str, page_offset_map=
             draw_header(placement["title_y"])
 
         desc = entry["desc"]
-        part = entry["part"]
-        display_part = part if part and not is_hydraulic_schematic_entry(desc) else ""
+        item_number = str(entry.get("item_number") or "").strip()
+        if is_hydraulic_schematic_entry(desc):
+            display_item = ""
+        elif is_index:
+            display_item = str(entry.get("part") or "").strip()
+        else:
+            display_item = item_number
         entry_index = placement["entry_index"]
         page_num = ""
         if "page_text" in entry and entry["page_text"]:
@@ -227,17 +314,23 @@ def create_directory_pdf_bytes(entries: list[dict], title: str, page_offset_map=
             page_num = str(page_offset_map[entry_index] + 1)
 
         c.setFont("Helvetica", 8)
-        desc_right_limit = placement["page_left_x"] - 8 if not display_part else placement["part_x"] - 8
-        desc = _trim_text_to_width(desc, "Helvetica", 8, desc_right_limit - placement["desc_x"])
-        c.drawString(placement["desc_x"], placement["y"], desc)
-        if display_part:
-            part_text = _trim_text_to_width(
-                f"[{display_part}]",
-                "Helvetica",
-                8,
-                placement["page_left_x"] - placement["part_x"] - 4,
-            )
-            c.drawRightString(placement["part_x"], placement["y"], part_text)
+        desc_line_height = 9
+        for line_index, desc_line in enumerate(placement.get("desc_lines", [desc])):
+            c.drawString(placement["desc_x"], placement["y"] - (line_index * desc_line_height), desc_line)
+
+        if display_item:
+            if is_index:
+                item_line_height = 9
+                for line_index, item_line in enumerate(placement.get("part_lines", [display_item])):
+                    c.drawRightString(placement["item_x"], placement["y"] - (line_index * item_line_height), item_line)
+            else:
+                item_text = _trim_text_to_width(
+                    display_item,
+                    "Helvetica",
+                    8,
+                    placement["item_x"] - placement["item_left_x"],
+                )
+                c.drawRightString(placement["item_x"], placement["y"], item_text)
         if page_num:
             c.drawRightString(placement["page_x"], placement["y"], page_num)
 
@@ -568,6 +661,7 @@ def build_manual_packet(
                 "code_tuple": parse_level_code(level),
                 "desc": desc,
                 "part": part,
+                "item_number": part,
                 "filename": f"{part}.pdf" if part else "",
             }
         )
@@ -584,6 +678,7 @@ def build_manual_packet(
                 "code_tuple": (0,),
                 "desc": "HYDRAULIC SCHEMATIC",
                 "part": "",
+                "item_number": "",
                 "filename": os.path.basename(schematic_pdf),
                 "parent_index": None,
                 "indent_level": 0,
@@ -614,8 +709,11 @@ def build_manual_packet(
     if not existing_entries:
         raise ValueError("No PDFs were added. Check your drawings folder and part numbers.")
 
+    for toc_index, entry in enumerate(existing_entries):
+        entry["toc_index"] = toc_index
+
     index_entries = _build_index_entries(existing_entries)
-    toc_entries = existing_entries + [{"desc": "Index", "part": "", "indent_level": 0}]
+    toc_entries = existing_entries + [{"desc": "Index", "part": "", "item_number": "", "indent_level": 0}]
     toc_packet, _ = create_directory_pdf_bytes(toc_entries, "Table of Contents")
     toc_pages = len(PdfReader(toc_packet).pages)
 
