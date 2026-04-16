@@ -341,6 +341,21 @@ def flatten_sections_to_rows(export_sections, schematic_file_path):
     return rows
 
 
+def export_structure_excel(structure_df, output_pdf_path):
+    structure_export = structure_df.copy()
+    preferred_columns = ["Level", "Description", "Part Number"]
+    available_columns = [col for col in preferred_columns if col in structure_export.columns]
+    structure_export = structure_export[available_columns]
+
+    output_dir = os.path.dirname(output_pdf_path)
+    output_stem = os.path.splitext(os.path.basename(output_pdf_path))[0]
+    structure_filename = f"{output_stem}_Structure.xlsx"
+    structure_path = os.path.join(output_dir, structure_filename)
+
+    structure_export.to_excel(structure_path, index=False)
+    return structure_path
+
+
 # ---------------------------------------------------------------------------
 # Hierarchy / TOC helpers
 # ---------------------------------------------------------------------------
@@ -1514,6 +1529,7 @@ def main():
 
     all_structure_rows = flatten_sections_to_rows(export_sections, schematic_file)
     structure_df = pd.DataFrame(all_structure_rows)
+    structure_export_path = export_structure_excel(structure_df, output_pdf)
 
     part_col = find_column(structure_df, ["Part Number", "PartNumber", "Part #", "Part"])
     desc_col = find_column(structure_df, ["Description", "Desc"])
@@ -1739,6 +1755,7 @@ def main():
         f"Automated Drawing Packet Builder v{APP_VERSION}\n\n"
         f"CAD exports used: {len(export_sections)}\n"
         f"Schematic used: {os.path.basename(schematic_file)}\n"
+        f"Exported structure: {structure_export_path}\n"
         f"Compiled PDF: {output_pdf}\n\n"
         f"Downloaded drawings: {len(downloaded)}"
     )

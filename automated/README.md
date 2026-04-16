@@ -39,7 +39,8 @@ If the program cannot reach internal print systems, it cannot download drawings.
 5. Continue.
 6. The tool downloads required drawing PDFs.
 7. The tool builds the final compiled PDF.
-8. The tool warns if any drawings are missing.
+8. The tool exports the generated packet structure to an Excel file.
+9. The tool warns if any drawings are missing.
 
 ## Step-by-Step
 
@@ -136,6 +137,13 @@ The compiled PDF includes:
 - Page numbers in `# / #` format
 
 The output filename is the one entered by the user.
+
+The tool also exports a structure Excel file next to the compiled PDF:
+- `<output_pdf_name>_Structure.xlsx`
+- Uses manual-builder style columns:
+  - `Level`
+  - `Description`
+  - `Part Number`
 
 ## Missing Drawings
 If some drawings cannot be found/downloaded, the tool still builds a packet from available files and shows a warning list at the end.
