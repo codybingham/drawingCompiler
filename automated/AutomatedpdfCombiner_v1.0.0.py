@@ -44,9 +44,8 @@ EXCLUDED_ITEMS = {
 TOC_DESCRIPTION_MAX_CHARS = 40
 TOC_PART_NUMBER_CHARS = 6
 TOC_MAX_PAGE_DIGITS = 5
-TOC_COLUMN_TEXT_GAP = 8
-TOC_COLUMN_LEFT_PADDING = 2
-TOC_COLUMN_RIGHT_PADDING = 4
+TOC_COLUMN_TEXT_GAP_OPTIONS = (6, 5, 4)
+TOC_COLUMN_INSET_OPTIONS = (2, 1)
 
 # ---------------------------------------------------------------------------
 # Config persistence (remembers last-used folder across runs)
@@ -451,49 +450,127 @@ def _build_index_entries(toc_entries):
     return sorted(grouped.values(), key=lambda entry: entry["desc"].casefold())
 
 
-def _choose_toc_font_and_columns(font_name, half_column_width):
-    probe = canvas.Canvas(BytesIO())
-    representative_desc = "W" * TOC_DESCRIPTION_MAX_CHARS
-    representative_part = "W" * TOC_PART_NUMBER_CHARS
-    representative_page = "9" * TOC_MAX_PAGE_DIGITS
-
-    for font_size in (8, 7):
-        desc_width = probe.stringWidth(representative_desc, font_name, font_size) + 2
-        part_width = probe.stringWidth(representative_part, font_name, font_size) + 4
-        page_width = probe.stringWidth(representative_page, font_name, font_size) + 4
-
-        required_width = (
-            TOC_COLUMN_LEFT_PADDING
-            + desc_width
-            + TOC_COLUMN_TEXT_GAP
-            + part_width
-            + TOC_COLUMN_TEXT_GAP
-            + page_width
-            + TOC_COLUMN_RIGHT_PADDING
-        )
-        if required_width <= half_column_width:
-            return {
-                "font_size": font_size,
-                "description_width": desc_width,
-                "part_width": part_width,
-                "page_width": page_width,
-            }
-
-    raise ValueError("TOC columns do not fit even at Arial 7.")
-
-
-def _layout_directory_entries(entries, is_index=False, desc_font_name="Helvetica", desc_font_size=8, toc_layout=None):
+def _get_toc_page_geometry():
     from reportlab.lib.pagesizes import letter, landscape
     from reportlab.lib.units import inch
 
     page_size = landscape(letter)
     width, height = page_size
-
     margin_left = 0.55 * inch
     margin_right = 0.55 * inch
     margin_top = 0.75 * inch
     margin_bottom = 0.6 * inch
     column_gap = 0.45 * inch
+
+    usable_width = width - margin_left - margin_right
+    half_column_width = (usable_width - column_gap) / 2
+    return {
+        "page_size": page_size,
+        "width": width,
+        "height": height,
+        "margin_left": margin_left,
+        "margin_right": margin_right,
+        "margin_top": margin_top,
+        "margin_bottom": margin_bottom,
+        "column_gap": column_gap,
+        "usable_width": usable_width,
+        "half_column_width": half_column_width,
+    }
+
+
+def _choose_toc_font_and_columns(half_column_width, arial_font_name):
+    probe = canvas.Canvas(BytesIO())
+
+    desc_probe_seed = "ASSEMBLY ITEM DESCRIPTION REFERENCE "
+    representative_desc = (desc_probe_seed * ((TOC_DESCRIPTION_MAX_CHARS // len(desc_probe_seed)) + 1))[:TOC_DESCRIPTION_MAX_CHARS]
+    representative_part = "ABC123"
+    representative_page = "9" * TOC_MAX_PAGE_DIGITS
+
+    font_candidates = []
+    if arial_font_name == "Arial":
+        font_candidates.extend([("Arial", 8), ("Arial", 7)])
+    else:
+        font_candidates.append((arial_font_name, 8))
+        font_candidates.append((arial_font_name, 7))
+    if ("Helvetica", 7) not in font_candidates:
+        font_candidates.append(("Helvetica", 7))
+
+    last_attempt = None
+    for font_name, font_size in font_candidates:
+        part_width = probe.stringWidth(representative_part, font_name, font_size)
+        page_width = probe.stringWidth(representative_page, font_name, font_size)
+
+        for text_gap in TOC_COLUMN_TEXT_GAP_OPTIONS:
+            for edge_inset in TOC_COLUMN_INSET_OPTIONS:
+                available_for_desc = (
+                    half_column_width
+                    - (2 * edge_inset)
+                    - (2 * text_gap)
+                    - part_width
+                    - page_width
+                )
+                desc_probe_width = probe.stringWidth(representative_desc, font_name, font_size)
+                fits = available_for_desc >= desc_probe_width
+
+                layout = {
+                    "font_name": font_name,
+                    "font_size": font_size,
+                    "description_width": max(0, available_for_desc),
+                    "part_width": part_width,
+                    "page_width": page_width,
+                    "text_gap": text_gap,
+                    "edge_inset": edge_inset,
+                    "desc_probe_width": desc_probe_width,
+                    "half_column_width": half_column_width,
+                }
+                logger.warning(
+                    "TOC fit check: half=%.2f desc=%.2f (probe %.2f) part=%.2f page=%.2f gap=%s inset=%s font=%s %spt fits=%s",
+                    half_column_width,
+                    layout["description_width"],
+                    desc_probe_width,
+                    part_width,
+                    page_width,
+                    text_gap,
+                    edge_inset,
+                    font_name,
+                    font_size,
+                    fits,
+                )
+                if fits:
+                    logger.warning(
+                        "TOC chosen layout: left_half=%.2f right_half=%.2f desc=%.2f part=%.2f page=%.2f gap=%s inset=%s font=%s %spt",
+                        half_column_width,
+                        half_column_width,
+                        layout["description_width"],
+                        part_width,
+                        page_width,
+                        text_gap,
+                        edge_inset,
+                        font_name,
+                        font_size,
+                    )
+                    return layout
+                last_attempt = layout
+
+    raise ValueError(
+        "TOC columns cannot fit after Arial 8/7, tightened gaps/insets, and Helvetica 7 "
+        f"(half={half_column_width:.2f}, last_desc={last_attempt['description_width']:.2f}, "
+        f"last_probe={last_attempt['desc_probe_width']:.2f}, part={last_attempt['part_width']:.2f}, "
+        f"page={last_attempt['page_width']:.2f}, gap={last_attempt['text_gap']}, inset={last_attempt['edge_inset']}, "
+        f"font={last_attempt['font_name']} {last_attempt['font_size']}pt)."
+    )
+
+
+def _layout_directory_entries(entries, is_index=False, desc_font_name="Helvetica", desc_font_size=8, toc_layout=None):
+    geometry = _get_toc_page_geometry()
+    page_size = geometry["page_size"]
+    width = geometry["width"]
+    height = geometry["height"]
+    margin_left = geometry["margin_left"]
+    margin_right = geometry["margin_right"]
+    margin_top = geometry["margin_top"]
+    margin_bottom = geometry["margin_bottom"]
+    column_gap = geometry["column_gap"]
 
     indent_step = 0.22 * inch
     row_height = 0.21 * inch
@@ -550,14 +627,16 @@ def _layout_directory_entries(entries, is_index=False, desc_font_name="Helvetica
                 page_column_width = toc_layout["page_width"]
                 item_column_width = toc_layout["part_width"]
                 desc_column_width = toc_layout["description_width"]
+                text_gap = toc_layout["text_gap"]
+                edge_inset = toc_layout["edge_inset"]
 
-                desc_x = column_left + TOC_COLUMN_LEFT_PADDING
-                item_left_x = desc_x + desc_column_width + TOC_COLUMN_TEXT_GAP
+                desc_x = column_left + edge_inset
+                item_left_x = desc_x + desc_column_width + text_gap
                 item_x = item_left_x + item_column_width
-                page_left_x = item_x + TOC_COLUMN_TEXT_GAP
+                page_left_x = item_x + text_gap
                 page_x = page_left_x + page_column_width
 
-                max_page_x = column_right - TOC_COLUMN_RIGHT_PADDING
+                max_page_x = column_right - edge_inset
                 if page_x > max_page_x:
                     raise ValueError("TOC column widths exceed available column width.")
 
@@ -672,16 +751,11 @@ def create_directory_pdf_bytes(entries, title, page_offset_map=None, is_index=Fa
 
     toc_layout = None
     if not is_index:
-        from reportlab.lib.pagesizes import letter, landscape
-        from reportlab.lib.units import inch
-
-        width, _ = landscape(letter)
-        margin_left = 0.55 * inch
-        margin_right = 0.55 * inch
-        column_gap = 0.45 * inch
-        usable_width = width - margin_left - margin_right
-        half_column_width = (usable_width - column_gap) / 2
-        toc_layout = _choose_toc_font_and_columns(toc_font_regular, half_column_width)
+        geometry = _get_toc_page_geometry()
+        toc_layout = _choose_toc_font_and_columns(geometry["half_column_width"], toc_font_regular)
+        toc_font_regular = toc_layout["font_name"]
+        if toc_font_regular == "Helvetica":
+            toc_font_bold = "Helvetica-Bold"
         desc_font_size = toc_layout["font_size"]
 
     packet = BytesIO()
