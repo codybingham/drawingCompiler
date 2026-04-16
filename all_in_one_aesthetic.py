@@ -933,7 +933,9 @@ class DrawingCompilerStudio(tk.Tk):
         self.configure(bg=C["bg"])
         self.history: list[str] = []
         self.current = "dashboard"
+        self._active_nav_key = "dashboard"
         self.reorder_model: StructureModel | None = None
+        self.reorder_tree: ttk.Treeview | None = None
         self.reorder_source_path: str | None = None
         self.reorder_item_lookup: dict[str, StructureNode] = {}
         self.reorder_undo_stack: list[tuple] = []
@@ -1088,6 +1090,8 @@ class DrawingCompilerStudio(tk.Tk):
                 b.configure(bg=C["card"], fg=c)
 
         def on_leave(e, b=btn):
+            if key == self._active_nav_key:
+                return
             if b["bg"] != C["border_hi"]:
                 b.configure(bg=C["surface"], fg=C["text_dim"])
 
@@ -1096,6 +1100,7 @@ class DrawingCompilerStudio(tk.Tk):
         return btn
 
     def _set_active_nav(self, key):
+        self._active_nav_key = key
         for k, btn in self.nav_buttons.items():
             color = WORKFLOW_META.get(k, {}).get("color", C["text_dim"])
             if k == key:
@@ -1116,6 +1121,7 @@ class DrawingCompilerStudio(tk.Tk):
     def _clear_main(self):
         for child in self.main_frame.winfo_children():
             child.destroy()
+        self.reorder_tree = None
 
     def _push(self):
         self.history.append(self.current)
@@ -1164,7 +1170,11 @@ class DrawingCompilerStudio(tk.Tk):
 
         inner.bind("<Configure>", _on_configure)
         canvas.bind("<Configure>", lambda e: canvas.itemconfig(window_id, width=e.width))
-        canvas.bind_all("<MouseWheel>", lambda e: canvas.yview_scroll(int(-1 * (e.delta / 120)), "units"))
+        def _on_mousewheel(e):
+            canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+
+        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _on_mousewheel))
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
         return inner
 
     def _page_header(self, parent, title, subtitle, accent_color=None):
@@ -1623,6 +1633,8 @@ class DrawingCompilerStudio(tk.Tk):
             self.reorder_model = StructureModel.from_dataframe(df)
             self.reorder_source_path = path
             self.reorder_undo_stack.clear()
+            if not self._reorder_tree_available():
+                self.show_workflow("reorder_structure", add_history=False)
             self._reorder_refresh()
         except Exception as exc:
             messagebox.showerror("Open failed", str(exc), parent=self)
@@ -1645,6 +1657,8 @@ class DrawingCompilerStudio(tk.Tk):
             messagebox.showerror("Save failed", str(exc), parent=self)
 
     def _reorder_refresh(self, select_node=None):
+        if not self._reorder_tree_available():
+            return
         for item in self.reorder_tree.get_children():
             self.reorder_tree.delete(item)
         self.reorder_item_lookup.clear()
@@ -1672,8 +1686,13 @@ class DrawingCompilerStudio(tk.Tk):
                     break
 
     def _reorder_selected_node(self):
+        if not self._reorder_tree_available():
+            return None
         sel = self.reorder_tree.selection()
         return self.reorder_item_lookup.get(sel[0]) if sel else None
+
+    def _reorder_tree_available(self):
+        return bool(self.reorder_tree and self.reorder_tree.winfo_exists())
 
     def _reorder_prompt(self, title, desc="", part=""):
         dialog = tk.Toplevel(self)
@@ -1814,6 +1833,8 @@ class DrawingCompilerStudio(tk.Tk):
         self._reorder_refresh(node)
 
     def _reorder_expand(self, expand):
+        if not self._reorder_tree_available():
+            return
         def toggle(item):
             self.reorder_tree.item(item, open=expand)
             for child in self.reorder_tree.get_children(item):
