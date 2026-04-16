@@ -16,7 +16,7 @@ Use this when you already have local drawing PDFs and a structured Excel file th
 - Script: `automated/AutomatedpdfCombiner_v1.0.0.py`
 - Documentation: `automated/README.md`
 
-Use this when you want to pull drawing PDFs from a structure file using internal services, without compiling a final packet.
+Use this when you want to ingest a CAD export + schematic, download drawings, and compile a final packet in the proper structure order with TOC and index.
 
 ### 3. Structure Helpers
 - Location: `helpers/`
@@ -63,6 +63,13 @@ python drawing_compiler_launcher.py
 ```
 
 The studio is implemented as a single-file program with unified workflow pages, so the project behaves like one cohesive application.
+The **Automated Packet Builder** flow now accepts:
+- CAD export (`.xlsx/.xls/.csv`)
+- schematic PDF
+- download folder
+- output PDF
+
+It then generates a structure workbook, downloads referenced drawings, and assembles TOC + packet + index in one run.
 
 ### Run Individual Tools
 1. Pick the tool (`manual` or `automated`) based on your workflow.

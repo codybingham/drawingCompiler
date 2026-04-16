@@ -19,7 +19,7 @@ This folder contains standalone helper tools that work with existing **structure
 python helpers/structure_reorder_gui_v1.0.0.py
 ```
 
-## 2) Structure Reference Downloader
+## 2) Drawing Downloader
 - Script: `helpers/structure_reference_downloader_v1.0.0.py`
 - Purpose: Read a structure Excel file and download all referenced files.
 
