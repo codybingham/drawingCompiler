@@ -1,6 +1,7 @@
 import os
 import re
 import tkinter as tk
+from io import BytesIO
 from dataclasses import dataclass
 from tkinter import filedialog, messagebox, ttk
 from typing import Callable
@@ -9,6 +10,15 @@ import pandas as pd
 import requests
 import urllib3
 from pypdf import PdfReader, PdfWriter
+from pypdf.generic import (
+    ArrayObject,
+    DictionaryObject,
+    FloatObject,
+    NameObject,
+    NumberObject,
+)
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfgen import canvas
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -29,7 +39,7 @@ WORKFLOWS = [
     Workflow("automated_packet", "Automated Packet Builder", "Download + build packet in one flow"),
     Workflow("cad_to_structure", "CAD Export to Structure", "Convert CAD exports to structure format"),
     Workflow("reorder_structure", "Structure Reorder", "Edit row order and renumber levels"),
-    Workflow("reference_download", "Reference Downloader", "Download drawing references from structure"),
+    Workflow("reference_download", "Drawing Downloader", "Download drawing references from structure"),
 ]
 
 
@@ -60,6 +70,223 @@ def parse_level_code(level: str) -> tuple:
         else:
             output.append(token)
     return tuple(output)
+
+
+def build_hierarchy(entries: list[dict]) -> list[dict]:
+    seen_codes: dict[tuple, int] = {}
+    processed: list[dict] = []
+
+    for entry in entries:
+        code = entry["code_tuple"]
+        parent_index = None
+        search = code[:-1]
+
+        while search:
+            if search in seen_codes:
+                parent_index = seen_codes[search]
+                break
+            search = search[:-1]
+
+        indent_level = 0 if parent_index is None else processed[parent_index]["indent_level"] + 1
+
+        new_entry = dict(entry)
+        new_entry["parent_index"] = parent_index
+        new_entry["indent_level"] = indent_level
+        processed.append(new_entry)
+        seen_codes[code] = len(processed) - 1
+
+    return processed
+
+
+def is_hydraulic_schematic_entry(description: str) -> bool:
+    return str(description).strip().upper().startswith("HYDRAULIC SCHEMATIC")
+
+
+def _build_index_entries(entries: list[dict]) -> list[dict]:
+    grouped: dict[str, dict] = {}
+    for i, entry in enumerate(entries):
+        key = entry["desc"].strip().casefold()
+        if key not in grouped:
+            grouped[key] = {
+                "desc": entry["desc"].strip(),
+                "part": "",
+                "indent_level": 0,
+                "toc_indices": [],
+            }
+        grouped[key]["toc_indices"].append(i)
+    return sorted(grouped.values(), key=lambda e: e["desc"].casefold())
+
+
+def _layout_directory_entries(entries: list[dict], is_index: bool = False):
+    from reportlab.lib.pagesizes import letter, landscape
+    from reportlab.lib.units import inch
+
+    page_size = landscape(letter)
+    width, height = page_size
+    margin_left = 0.55 * inch
+    margin_right = 0.55 * inch
+    margin_top = 0.75 * inch
+    margin_bottom = 0.6 * inch
+    column_gap = 0.45 * inch
+    indent_step = 0.22 * inch
+    row_height = 0.21 * inch
+
+    usable_width = width - margin_left - margin_right
+    column_width = (usable_width - column_gap) / 2
+    column_lefts = [margin_left, margin_left + column_width + column_gap]
+    rows_per_column = max(1, int((height - margin_top - margin_bottom - (0.52 * inch)) / row_height))
+    rows_per_page = rows_per_column * 2
+
+    placements = []
+    for idx, entry in enumerate(entries):
+        per_page_index = idx % rows_per_page
+        page_index = idx // rows_per_page
+        col_index = per_page_index // rows_per_column
+        row_index = per_page_index % rows_per_column
+
+        column_left = column_lefts[col_index]
+        column_right = column_left + column_width
+        title_y = height - margin_top
+        y = title_y - 0.45 * inch - row_index * row_height
+        desc_x = column_left + (0 if is_index else entry["indent_level"] * indent_step)
+        page_x = column_right - 4
+        page_left_x = column_right - (0.8 * inch)
+        part_x = page_left_x - 6
+
+        placements.append(
+            {
+                "entry_index": idx,
+                "page_index": page_index,
+                "desc_x": desc_x,
+                "part_x": part_x,
+                "page_x": page_x,
+                "page_left_x": page_left_x,
+                "y": y,
+                "title_y": title_y,
+            }
+        )
+
+    total_pages = (len(entries) + rows_per_page - 1) // rows_per_page if entries else 1
+    return page_size, placements, total_pages
+
+
+def _trim_text_to_width(text: str, font_name: str, font_size: int, max_width: float) -> str:
+    if max_width <= 0:
+        return ""
+    if pdfmetrics.stringWidth(text, font_name, font_size) <= max_width:
+        return text
+
+    ellipsis = "..."
+    ellipsis_width = pdfmetrics.stringWidth(ellipsis, font_name, font_size)
+    available = max_width - ellipsis_width
+    if available <= 0:
+        return ellipsis
+
+    trimmed = text
+    while trimmed and pdfmetrics.stringWidth(trimmed, font_name, font_size) > available:
+        trimmed = trimmed[:-1]
+    return f"{trimmed}{ellipsis}"
+
+
+def create_directory_pdf_bytes(entries: list[dict], title: str, page_offset_map=None, is_index: bool = False):
+    packet = BytesIO()
+    page_size, placements, _ = _layout_directory_entries(entries, is_index=is_index)
+    c = canvas.Canvas(packet, pagesize=page_size)
+    width, _ = page_size
+
+    def draw_header(title_y):
+        c.setFont("Helvetica-Bold", 16)
+        c.drawString(40, title_y, title)
+        c.setLineWidth(0.5)
+        c.line(40, title_y - 6, width - 40, title_y - 6)
+        c.setFont("Helvetica", 10)
+
+    current_page = -1
+    for placement in placements:
+        entry = entries[placement["entry_index"]]
+        if placement["page_index"] != current_page:
+            if current_page != -1:
+                c.showPage()
+            current_page = placement["page_index"]
+            draw_header(placement["title_y"])
+
+        desc = entry["desc"]
+        part = entry["part"]
+        display_part = part if part and not is_hydraulic_schematic_entry(desc) else ""
+        entry_index = placement["entry_index"]
+        page_num = ""
+        if "page_text" in entry and entry["page_text"]:
+            page_num = entry["page_text"]
+        elif page_offset_map is not None and page_offset_map[entry_index] is not None:
+            page_num = str(page_offset_map[entry_index] + 1)
+
+        c.setFont("Helvetica", 8)
+        desc_right_limit = placement["page_left_x"] - 8 if is_index or not display_part else placement["part_x"] - 8
+        desc = _trim_text_to_width(desc, "Helvetica", 8, desc_right_limit - placement["desc_x"])
+        c.drawString(placement["desc_x"], placement["y"], desc)
+        if display_part:
+            part_text = _trim_text_to_width(
+                f"[{display_part}]",
+                "Helvetica",
+                8,
+                placement["page_left_x"] - placement["part_x"] - 4,
+            )
+            c.drawRightString(placement["part_x"], placement["y"], part_text)
+        if page_num:
+            c.drawRightString(placement["page_x"], placement["y"], page_num)
+
+    if current_page == -1:
+        draw_header(page_size[1] - (0.75 * 72))
+
+    c.save()
+    packet.seek(0)
+    return packet, placements
+
+
+def _add_internal_link_annotation(writer: PdfWriter, from_page_index: int, target_page_index: int, rect: list[float]) -> None:
+    target_ref = writer.pages[target_page_index].indirect_reference
+    annotation = DictionaryObject()
+    annotation.update(
+        {
+            NameObject("/Type"): NameObject("/Annot"),
+            NameObject("/Subtype"): NameObject("/Link"),
+            NameObject("/Rect"): ArrayObject([FloatObject(x) for x in rect]),
+            NameObject("/Border"): ArrayObject([NumberObject(0), NumberObject(0), NumberObject(0)]),
+            NameObject("/A"): DictionaryObject(
+                {
+                    NameObject("/S"): NameObject("/GoTo"),
+                    NameObject("/D"): ArrayObject([target_ref, NameObject("/Fit")]),
+                }
+            ),
+        }
+    )
+    writer.add_annotation(from_page_index, annotation)
+
+
+def add_toc_hyperlinks(writer: PdfWriter, toc_placements: list[dict], effective_page_map: list[int | None], line_height: int = 12) -> None:
+    for placement in toc_placements:
+        target_page = effective_page_map[placement["entry_index"]]
+        if target_page is None:
+            continue
+        _add_internal_link_annotation(
+            writer=writer,
+            from_page_index=placement["page_index"],
+            target_page_index=target_page,
+            rect=[placement["desc_x"] - 2, placement["y"] - 1, placement["page_x"] + 1, placement["y"] + line_height],
+        )
+
+
+def add_page_number_overlay(page, page_num_text: int, total_pages_text: int) -> None:
+    width = float(page.mediabox.width)
+    height = float(page.mediabox.height)
+    packet = BytesIO()
+    c = canvas.Canvas(packet, pagesize=(width, height))
+    c.setFont("Helvetica", 8)
+    c.drawCentredString(width / 2, 5, f"{page_num_text} / {total_pages_text}")
+    c.save()
+    packet.seek(0)
+    overlay_pdf = PdfReader(packet)
+    page.merge_page(overlay_pdf.pages[0])
 
 
 def _clean_cell(value) -> str:
@@ -311,6 +538,7 @@ def build_manual_packet(
     structure_path: str,
     drawings_folder: str,
     output_pdf: str,
+    schematic_pdf: str | None = None,
     progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> dict:
     df = pd.read_excel(structure_path)
@@ -321,58 +549,143 @@ def build_manual_packet(
     if not level_col or not desc_col or not part_col:
         raise ValueError("Structure file must include Level, Description, and Part Number columns")
 
-    entries = []
+    raw_entries = []
     for _, row in df.iterrows():
         level = "" if pd.isna(row[level_col]) else str(row[level_col]).strip()
         desc = "" if pd.isna(row[desc_col]) else str(row[desc_col]).strip()
         part = "" if pd.isna(row[part_col]) else str(row[part_col]).strip()
         if not level:
             continue
-        entries.append({"code": parse_level_code(level), "desc": desc, "part": part})
+        raw_entries.append(
+            {
+                "code_text": level,
+                "code_tuple": parse_level_code(level),
+                "desc": desc,
+                "part": part,
+                "filename": f"{part}.pdf" if part else "",
+            }
+        )
 
-    entries.sort(key=lambda e: e["code"])
+    raw_entries.sort(key=lambda entry: entry["code_tuple"])
+    toc_entries = build_hierarchy(raw_entries)
+    existing_entries: list[dict] = []
+    missing_files: list[str] = []
 
-    writer = PdfWriter()
-    missing = []
-    included = 0
+    if schematic_pdf and os.path.exists(schematic_pdf):
+        existing_entries.append(
+            {
+                "code_text": "0",
+                "code_tuple": (0,),
+                "desc": "HYDRAULIC SCHEMATIC",
+                "part": "",
+                "filename": os.path.basename(schematic_pdf),
+                "parent_index": None,
+                "indent_level": 0,
+                "_source_path": schematic_pdf,
+            }
+        )
 
     if progress_callback:
-        progress_callback(0, len(entries), "Scanning structure entries...")
+        progress_callback(0, len(toc_entries), "Scanning structure entries...")
 
-    for idx, entry in enumerate(entries, start=1):
+    for idx, entry in enumerate(toc_entries, start=1):
         part = entry["part"]
         if not part:
             continue
         pdf_path = _find_pdf_for_part(drawings_folder, part)
         if not pdf_path:
-            missing.append(part)
+            missing_files.append(f"{part}.pdf")
             if progress_callback:
-                progress_callback(idx, len(entries), f"Missing drawing for {part}")
+                progress_callback(idx, len(toc_entries), f"Missing drawing for {part}")
             continue
 
-        reader = PdfReader(pdf_path)
+        new_entry = dict(entry)
+        new_entry["_source_path"] = pdf_path
+        existing_entries.append(new_entry)
+        if progress_callback:
+            progress_callback(idx, len(toc_entries), f"Queued {part}")
+
+    if not existing_entries:
+        raise ValueError("No PDFs were added. Check your drawings folder and part numbers.")
+
+    index_entries = _build_index_entries(existing_entries)
+    toc_entries = existing_entries + [{"desc": "Index", "part": "", "indent_level": 0}]
+    toc_packet, _ = create_directory_pdf_bytes(toc_entries, "Table of Contents")
+    toc_pages = len(PdfReader(toc_packet).pages)
+
+    page_offset_map = []
+    current_page = toc_pages
+    for entry in existing_entries:
+        reader = PdfReader(entry["_source_path"])
+        page_offset_map.append(current_page)
+        current_page += len(reader.pages)
+    index_start_page = current_page
+    toc_page_map = page_offset_map + [index_start_page]
+
+    toc_packet, toc_placements = create_directory_pdf_bytes(toc_entries, "Table of Contents", toc_page_map)
+    for entry in index_entries:
+        pages = []
+        for toc_index in entry["toc_indices"]:
+            page = page_offset_map[toc_index]
+            if page is not None and page not in pages:
+                pages.append(page)
+        entry["page_text"] = ", ".join(str(page + 1) for page in pages)
+    index_packet, _ = create_directory_pdf_bytes(index_entries, "Index", is_index=True)
+
+    writer = PdfWriter()
+    for page in PdfReader(toc_packet).pages:
+        writer.add_page(page)
+
+    entry_start_page = {}
+    for entry in existing_entries:
+        reader = PdfReader(entry["_source_path"])
+        start_page = len(writer.pages)
+        entry_start_page[id(entry)] = start_page
         for page in reader.pages:
             writer.add_page(page)
-        included += 1
-        if progress_callback:
-            progress_callback(idx, len(entries), f"Added {part}")
 
-    if not writer.pages:
-        raise ValueError("No PDFs were added. Check your drawings folder and part numbers.")
+    for page in PdfReader(index_packet).pages:
+        writer.add_page(page)
+
+    bookmark_refs = {}
+    for entry in existing_entries:
+        start_page = entry_start_page[id(entry)]
+        parent = None
+        parent_index = entry["parent_index"]
+        if parent_index is not None:
+            parent_entry = toc_entries[parent_index]
+            if id(parent_entry) in entry_start_page:
+                parent = bookmark_refs.get(id(parent_entry))
+        bookmark_refs[id(entry)] = writer.add_outline_item(entry["desc"], start_page, parent=parent)
+
+    add_toc_hyperlinks(writer, toc_placements, toc_page_map)
+
+    total_pages = len(writer.pages)
+    for i, page in enumerate(writer.pages):
+        add_page_number_overlay(page, i + 1, total_pages)
 
     os.makedirs(os.path.dirname(output_pdf) or ".", exist_ok=True)
     with open(output_pdf, "wb") as f:
         writer.write(f)
 
-    return {"output_pdf": output_pdf, "included_parts": included, "missing_parts": missing}
+    return {
+        "output_pdf": output_pdf,
+        "included_parts": len(existing_entries),
+        "missing_parts": missing_files,
+        "index_entries": len(index_entries),
+    }
 
 
 def build_automated_packet(
-    structure_path: str,
+    cad_export_path: str,
+    schematic_pdf: str,
     temp_download_folder: str,
     output_pdf: str,
     progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> dict:
+    structure_path = default_output_path(cad_export_path, "_structure", ".xlsx")
+    convert_cad_to_structure(cad_export_path, structure_path)
+
     def phase_download(completed: int, total: int, message: str) -> None:
         if progress_callback:
             progress_callback(completed, total if total > 0 else 1, f"Download phase: {message}")
@@ -387,10 +700,12 @@ def build_automated_packet(
         structure_path,
         temp_download_folder,
         output_pdf,
+        schematic_pdf=schematic_pdf,
         progress_callback=phase_build,
     )
     return {
         "output_pdf": packet_result["output_pdf"],
+        "structure_path": structure_path,
         "included_parts": packet_result["included_parts"],
         "missing_parts": packet_result["missing_parts"],
         "failed_downloads": download_result["failed"],
@@ -766,9 +1081,12 @@ class DrawingCompilerStudio(tk.Tk):
             output_var.set(default_output_path(path, output_suffix, extension))
 
     def _manual_packet_page(self) -> None:
-        card = self._card("Manual Packet Builder", "Build a merged PDF packet from structure rows and local drawing PDFs.")
+        card = self._card(
+            "Manual Packet Builder",
+            "Build a merged PDF packet from structure rows, local drawing PDFs, and an optional schematic PDF.",
+        )
 
-        structure_var, drawings_var, output_var = tk.StringVar(), tk.StringVar(), tk.StringVar()
+        structure_var, drawings_var, schematic_var, output_var = tk.StringVar(), tk.StringVar(), tk.StringVar(), tk.StringVar()
         form = ttk.Frame(card, style="Card.TFrame")
         form.pack(fill="x", pady=4)
 
@@ -794,12 +1112,21 @@ class DrawingCompilerStudio(tk.Tk):
         )
         self._path_row(
             form,
+            "Schematic PDF (optional)",
+            schematic_var,
+            lambda: schematic_var.set(
+                filedialog.askopenfilename(filetypes=[("PDF", "*.pdf"), ("All", "*.*")]) or schematic_var.get()
+            ),
+            4,
+        )
+        self._path_row(
+            form,
             "Output PDF",
             output_var,
             lambda: output_var.set(
                 filedialog.asksaveasfilename(defaultextension=".pdf", filetypes=[("PDF", "*.pdf")]) or output_var.get()
             ),
-            4,
+            6,
         )
         form.columnconfigure(0, weight=1)
 
@@ -818,6 +1145,7 @@ class DrawingCompilerStudio(tk.Tk):
                     structure_var.get(),
                     drawings_var.get(),
                     output_var.get(),
+                    schematic_pdf=schematic_var.get().strip() or None,
                     progress_callback=progress.update,
                 )
                 messagebox.showinfo(
@@ -842,31 +1170,43 @@ class DrawingCompilerStudio(tk.Tk):
         ttk.Button(card, text="Build Manual Packet", style="Primary.TButton", command=run_manual).pack(anchor="w", pady=(12, 0))
 
     def _automated_packet_page(self) -> None:
-        card = self._card("Automated Packet Builder", "Download references then compile a final merged packet in one run.")
+        card = self._card(
+            "Automated Packet Builder",
+            "Ingest CAD export + schematic, generate structure, download drawings, then build packet with TOC and index.",
+        )
 
-        structure_var, download_var, output_var = tk.StringVar(), tk.StringVar(), tk.StringVar()
+        cad_var, schematic_var, download_var, output_var = tk.StringVar(), tk.StringVar(), tk.StringVar(), tk.StringVar()
         form = ttk.Frame(card, style="Card.TFrame")
         form.pack(fill="x", pady=4)
 
         self._path_row(
             form,
-            "Structure workbook",
-            structure_var,
-            lambda: self._set_structure_and_default_output(
-                structure_var,
+            "CAD export workbook/csv",
+            cad_var,
+            lambda: self._set_input_and_default_output(
+                cad_var,
                 output_var,
                 "_automated_packet",
                 ".pdf",
-                [("Excel", "*.xlsx *.xlsm *.xls"), ("All", "*.*")],
+                [("Supported", "*.xlsx *.xlsm *.xls *.csv"), ("All", "*.*")],
             ),
             0,
+        )
+        self._path_row(
+            form,
+            "Schematic PDF",
+            schematic_var,
+            lambda: schematic_var.set(
+                filedialog.askopenfilename(filetypes=[("PDF", "*.pdf"), ("All", "*.*")]) or schematic_var.get()
+            ),
+            2,
         )
         self._path_row(
             form,
             "Download folder",
             download_var,
             lambda: download_var.set(filedialog.askdirectory() or download_var.get()),
-            2,
+            4,
         )
         self._path_row(
             form,
@@ -875,13 +1215,13 @@ class DrawingCompilerStudio(tk.Tk):
             lambda: output_var.set(
                 filedialog.asksaveasfilename(defaultextension=".pdf", filetypes=[("PDF", "*.pdf")]) or output_var.get()
             ),
-            4,
+            6,
         )
         form.columnconfigure(0, weight=1)
 
         def run_auto() -> None:
-            if not structure_var.get() or not download_var.get() or not output_var.get():
-                messagebox.showwarning("Missing data", "Choose structure, download folder, and output PDF.", parent=self)
+            if not cad_var.get() or not schematic_var.get() or not download_var.get() or not output_var.get():
+                messagebox.showwarning("Missing data", "Choose CAD export, schematic PDF, download folder, and output PDF.", parent=self)
                 return
             try:
                 validate_output_filename(output_var.get())
@@ -891,7 +1231,8 @@ class DrawingCompilerStudio(tk.Tk):
             progress = ProgressDialog(self, "Running Automated Build")
             try:
                 result = build_automated_packet(
-                    structure_var.get(),
+                    cad_var.get(),
+                    schematic_var.get(),
                     download_var.get(),
                     output_var.get(),
                     progress_callback=progress.update,
@@ -901,6 +1242,7 @@ class DrawingCompilerStudio(tk.Tk):
                     "\n".join(
                         [
                             f"Output: {result['output_pdf']}",
+                            f"Generated structure: {result['structure_path']}",
                             f"Included: {result['included_parts']}",
                             f"Missing in packet: {len(result['missing_parts'])}",
                             f"Download failures: {len(result['failed_downloads'])}",
@@ -1192,7 +1534,7 @@ class DrawingCompilerStudio(tk.Tk):
         ttk.Button(actions, text="Collapse All", command=collapse_all).pack(side="left", padx=(8, 0))
 
     def _reference_page(self) -> None:
-        card = self._card("Reference Downloader", "Download drawings by part/URL references from a structure workbook.")
+        card = self._card("Drawing Downloader", "Download drawings by part/URL references from a structure workbook.")
 
         structure_var, output_var = tk.StringVar(), tk.StringVar()
         form = ttk.Frame(card, style="Card.TFrame")
@@ -1220,7 +1562,7 @@ class DrawingCompilerStudio(tk.Tk):
             if not structure_var.get() or not output_var.get():
                 messagebox.showwarning("Missing data", "Choose structure file and output folder.", parent=self)
                 return
-            progress = ProgressDialog(self, "Downloading References")
+            progress = ProgressDialog(self, "Drawing Downloader")
             try:
                 result = download_references(structure_var.get(), output_var.get(), progress_callback=progress.update)
                 messagebox.showinfo(
@@ -1245,7 +1587,7 @@ class DrawingCompilerStudio(tk.Tk):
             finally:
                 progress.close()
 
-        ttk.Button(card, text="Download References", style="Primary.TButton", command=run_download).pack(anchor="w", pady=(12, 0))
+        ttk.Button(card, text="Download Drawings", style="Primary.TButton", command=run_download).pack(anchor="w", pady=(12, 0))
 
 
 def main() -> None:
