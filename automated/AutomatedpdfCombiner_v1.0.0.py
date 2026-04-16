@@ -21,7 +21,6 @@ from pypdf.generic import (
 from reportlab.pdfgen import canvas
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.lib.units import inch
 
 # Suppress only for this session; scoped to avoid global side-effects in larger processes
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -41,12 +40,6 @@ EXCLUDED_ITEMS = {
     "HA0817",
     "984398",
 }
-
-TOC_DESCRIPTION_MAX_CHARS = 40
-TOC_PART_NUMBER_CHARS = 6
-TOC_MAX_PAGE_DIGITS = 5
-TOC_COLUMN_TEXT_GAP_OPTIONS = (6, 5, 4)
-TOC_COLUMN_INSET_OPTIONS = (2, 1)
 
 # ---------------------------------------------------------------------------
 # Config persistence (remembers last-used folder across runs)
@@ -451,127 +444,18 @@ def _build_index_entries(toc_entries):
     return sorted(grouped.values(), key=lambda entry: entry["desc"].casefold())
 
 
-def _get_toc_page_geometry():
+def _layout_directory_entries(entries, is_index=False, desc_font_name="Helvetica", desc_font_size=8):
     from reportlab.lib.pagesizes import letter, landscape
     from reportlab.lib.units import inch
 
     page_size = landscape(letter)
     width, height = page_size
+
     margin_left = 0.55 * inch
     margin_right = 0.55 * inch
     margin_top = 0.75 * inch
     margin_bottom = 0.6 * inch
     column_gap = 0.45 * inch
-
-    usable_width = width - margin_left - margin_right
-    half_column_width = (usable_width - column_gap) / 2
-    return {
-        "page_size": page_size,
-        "width": width,
-        "height": height,
-        "margin_left": margin_left,
-        "margin_right": margin_right,
-        "margin_top": margin_top,
-        "margin_bottom": margin_bottom,
-        "column_gap": column_gap,
-        "usable_width": usable_width,
-        "half_column_width": half_column_width,
-    }
-
-
-def _choose_toc_font_and_columns(half_column_width, arial_font_name):
-    probe = canvas.Canvas(BytesIO())
-
-    desc_probe_seed = "ASSEMBLY ITEM DESCRIPTION REFERENCE "
-    representative_desc = (desc_probe_seed * ((TOC_DESCRIPTION_MAX_CHARS // len(desc_probe_seed)) + 1))[:TOC_DESCRIPTION_MAX_CHARS]
-    representative_part = "ABC123"
-    representative_page = "9" * TOC_MAX_PAGE_DIGITS
-
-    font_candidates = []
-    if arial_font_name == "Arial":
-        font_candidates.extend([("Arial", 8), ("Arial", 7)])
-    else:
-        font_candidates.append((arial_font_name, 8))
-        font_candidates.append((arial_font_name, 7))
-    if ("Helvetica", 7) not in font_candidates:
-        font_candidates.append(("Helvetica", 7))
-
-    last_attempt = None
-    for font_name, font_size in font_candidates:
-        part_width = probe.stringWidth(representative_part, font_name, font_size)
-        page_width = probe.stringWidth(representative_page, font_name, font_size)
-
-        for text_gap in TOC_COLUMN_TEXT_GAP_OPTIONS:
-            for edge_inset in TOC_COLUMN_INSET_OPTIONS:
-                available_for_desc = (
-                    half_column_width
-                    - (2 * edge_inset)
-                    - (2 * text_gap)
-                    - part_width
-                    - page_width
-                )
-                desc_probe_width = probe.stringWidth(representative_desc, font_name, font_size)
-                fits = available_for_desc >= desc_probe_width
-
-                layout = {
-                    "font_name": font_name,
-                    "font_size": font_size,
-                    "description_width": max(0, available_for_desc),
-                    "part_width": part_width,
-                    "page_width": page_width,
-                    "text_gap": text_gap,
-                    "edge_inset": edge_inset,
-                    "desc_probe_width": desc_probe_width,
-                    "half_column_width": half_column_width,
-                }
-                logger.warning(
-                    "TOC fit check: half=%.2f desc=%.2f (probe %.2f) part=%.2f page=%.2f gap=%s inset=%s font=%s %spt fits=%s",
-                    half_column_width,
-                    layout["description_width"],
-                    desc_probe_width,
-                    part_width,
-                    page_width,
-                    text_gap,
-                    edge_inset,
-                    font_name,
-                    font_size,
-                    fits,
-                )
-                if fits:
-                    logger.warning(
-                        "TOC chosen layout: left_half=%.2f right_half=%.2f desc=%.2f part=%.2f page=%.2f gap=%s inset=%s font=%s %spt",
-                        half_column_width,
-                        half_column_width,
-                        layout["description_width"],
-                        part_width,
-                        page_width,
-                        text_gap,
-                        edge_inset,
-                        font_name,
-                        font_size,
-                    )
-                    return layout
-                last_attempt = layout
-
-    raise ValueError(
-        "TOC columns cannot fit after Arial 8/7, tightened gaps/insets, and Helvetica 7 "
-        f"(half={half_column_width:.2f}, last_desc={last_attempt['description_width']:.2f}, "
-        f"last_probe={last_attempt['desc_probe_width']:.2f}, part={last_attempt['part_width']:.2f}, "
-        f"page={last_attempt['page_width']:.2f}, gap={last_attempt['text_gap']}, inset={last_attempt['edge_inset']}, "
-        f"font={last_attempt['font_name']} {last_attempt['font_size']}pt)."
-    )
-
-
-def _layout_directory_entries(entries, is_index=False, desc_font_name="Helvetica", desc_font_size=8, toc_layout=None):
-    geometry = _get_toc_page_geometry()
-    page_size = geometry["page_size"]
-    width = geometry["width"]
-    height = geometry["height"]
-    margin_left = geometry["margin_left"]
-    margin_right = geometry["margin_right"]
-    margin_top = geometry["margin_top"]
-    margin_bottom = geometry["margin_bottom"]
-    column_gap = geometry["column_gap"]
 
     indent_step = 0.22 * inch
     row_height = 0.21 * inch
@@ -596,25 +480,24 @@ def _layout_directory_entries(entries, is_index=False, desc_font_name="Helvetica
             title_y = height - margin_top
             y = title_y - 0.45 * inch - row_index * row_height
             desc_x = column_left + (0 if is_index else entry["indent_level"] * indent_step)
-            desc_column_width = None
+            page_x = column_right - 4
+            page_column_width = (1.35 * inch) if is_index else (0.62 * inch)
+            item_column_width = 0.9 * inch if is_index else 1.05 * inch
+            page_left_x = column_right - page_column_width
+            item_x = page_left_x - 8
+            item_left_x = item_x - item_column_width
+
+            desc_right_limit = item_left_x - 8
+            desc_max_width = max(0, desc_right_limit - desc_x)
+            desc_lines = _wrap_text_to_width(
+                entry["desc"],
+                desc_font_name,
+                desc_font_size,
+                desc_max_width,
+            )
+
+            part_lines = []
             if is_index:
-                page_x = column_right - 4
-                page_column_width = 1.35 * inch
-                item_column_width = 0.9 * inch
-                page_left_x = column_right - page_column_width
-                item_x = page_left_x - 8
-                item_left_x = item_x - item_column_width
-
-                desc_right_limit = item_left_x - 8
-                desc_max_width = max(0, desc_right_limit - desc_x)
-                desc_lines = _wrap_text_to_width(
-                    entry["desc"],
-                    desc_font_name,
-                    desc_font_size,
-                    desc_max_width,
-                )
-
-                part_lines = []
                 part_text = str(entry.get("part") or "").strip()
                 if part_text:
                     part_lines = _wrap_text_to_width(
@@ -623,37 +506,9 @@ def _layout_directory_entries(entries, is_index=False, desc_font_name="Helvetica
                         desc_font_size,
                         item_column_width,
                     )
-                row_span = max(len(desc_lines), len(part_lines), 1)
-            else:
-                page_column_width = toc_layout["page_width"]
-                item_column_width = toc_layout["part_width"]
-                desc_column_width = toc_layout["description_width"]
-                text_gap = toc_layout["text_gap"]
-                edge_inset = toc_layout["edge_inset"]
 
-                desc_x = column_left + edge_inset
-                item_left_x = desc_x + desc_column_width + text_gap
-                item_x = item_left_x + item_column_width
-                page_left_x = item_x + text_gap
-                page_x = page_left_x + page_column_width
-
-                max_page_x = column_right - edge_inset
-                if page_x > max_page_x:
-                    raise ValueError("TOC column widths exceed available column width.")
-
-                desc_text = str(entry.get("desc") or "")
-                item_text = str(entry.get("item_number") or "").strip()
-                desc_width = pdfmetrics.stringWidth(desc_text, desc_font_name, desc_font_size)
-                if desc_width > desc_column_width:
-                    raise ValueError(f"TOC description is too wide: '{desc_text}'")
-                if item_text and not is_hydraulic_schematic_entry(desc_text):
-                    item_width = pdfmetrics.stringWidth(item_text, desc_font_name, desc_font_size)
-                    if item_width > item_column_width:
-                        raise ValueError(f"TOC part number is too wide: '{item_text}'")
-
-                desc_lines = [desc_text]
-                part_lines = []
-                row_span = 1
+            page_wrap = is_index and _should_wrap_index_pages(entry)
+            row_span = max(len(desc_lines), len(part_lines), 2 if page_wrap else 1)
 
             if (row_cursor % rows_per_column) + row_span > rows_per_column:
                 row_cursor += rows_per_column - (row_cursor % rows_per_column)
@@ -671,13 +526,12 @@ def _layout_directory_entries(entries, is_index=False, desc_font_name="Helvetica
                 "page_x": page_x,
                 "page_left_x": page_left_x,
                 "y": y,
+                "page_y": y - row_height if page_wrap else y,
                 "title_y": title_y,
                 "row_span": row_span,
                 "desc_lines": desc_lines,
                 "part_lines": part_lines,
-                "desc_column_width": desc_column_width if not is_index else None,
-                "item_column_width": item_column_width,
-                "page_column_width": page_column_width,
+                "page_wrap": page_wrap,
             }
         )
         row_cursor += row_span
@@ -746,18 +600,20 @@ def _wrap_text_to_width(text, font_name, font_size, max_width):
     return lines or [text]
 
 
+def _index_page_count(entry):
+    page_text = (entry.get("page_text") or "").strip()
+    if page_text:
+        return len([part for part in page_text.split(",") if part.strip()])
+    return len(entry.get("toc_indices") or [])
+
+
+def _should_wrap_index_pages(entry):
+    return _index_page_count(entry) >= 4
+
+
 def create_directory_pdf_bytes(entries, title, page_offset_map=None, is_index=False):
     toc_font_regular, toc_font_bold = _get_toc_fonts()
     desc_font_size = 8
-
-    toc_layout = None
-    if not is_index:
-        geometry = _get_toc_page_geometry()
-        toc_layout = _choose_toc_font_and_columns(geometry["half_column_width"], toc_font_regular)
-        toc_font_regular = toc_layout["font_name"]
-        if toc_font_regular == "Helvetica":
-            toc_font_bold = "Helvetica-Bold"
-        desc_font_size = toc_layout["font_size"]
 
     packet = BytesIO()
     page_size, placements, total_pages = _layout_directory_entries(
@@ -765,7 +621,6 @@ def create_directory_pdf_bytes(entries, title, page_offset_map=None, is_index=Fa
         is_index=is_index,
         desc_font_name=toc_font_regular,
         desc_font_size=desc_font_size,
-        toc_layout=toc_layout,
     )
     c = canvas.Canvas(packet, pagesize=page_size)
     width, _ = page_size
@@ -811,7 +666,9 @@ def create_directory_pdf_bytes(entries, title, page_offset_map=None, is_index=Fa
             for line_index, desc_line in enumerate(placement.get("desc_lines", [desc])):
                 c.drawString(placement["desc_x"], placement["y"] - (line_index * desc_line_height), desc_line)
         else:
-            c.drawString(placement["desc_x"], placement["y"], desc)
+            desc_line_height = 9
+            for line_index, desc_line in enumerate(placement.get("desc_lines", [desc])):
+                c.drawString(placement["desc_x"], placement["y"] - (line_index * desc_line_height), desc_line)
 
         if display_item:
             if is_index:
@@ -819,13 +676,18 @@ def create_directory_pdf_bytes(entries, title, page_offset_map=None, is_index=Fa
                 for line_index, item_line in enumerate(placement.get("part_lines", [display_item])):
                     c.drawRightString(placement["item_x"], placement["y"] - (line_index * item_line_height), item_line)
             else:
-                item_width = c.stringWidth(display_item, toc_font_regular, desc_font_size)
-                if item_width > placement["item_column_width"]:
-                    raise ValueError(f"TOC part number is too wide: '{display_item}'")
-                c.drawRightString(placement["item_x"], placement["y"], display_item)
+                item_text = _trim_text_to_width(
+                    display_item,
+                    toc_font_regular,
+                    8,
+                    placement["item_x"] - placement["item_left_x"],
+                )
+                c.drawRightString(placement["item_x"], placement["y"], item_text)
 
         if page_num:
-            if is_index:
+            if is_index and placement.get("page_wrap"):
+                c.drawRightString(placement["page_x"], placement["page_y"], page_num)
+            else:
                 page_text = _trim_text_to_width(
                     page_num,
                     toc_font_regular,
@@ -833,11 +695,6 @@ def create_directory_pdf_bytes(entries, title, page_offset_map=None, is_index=Fa
                     placement["page_x"] - placement["page_left_x"],
                 )
                 c.drawRightString(placement["page_x"], placement["y"], page_text)
-            else:
-                page_width = c.stringWidth(page_num, toc_font_regular, desc_font_size)
-                if page_width > placement["page_column_width"]:
-                    raise ValueError(f"TOC page number is too wide: '{page_num}'")
-                c.drawRightString(placement["page_x"], placement["y"], page_num)
 
     if current_page == -1:
         draw_header(page_size[1] - (0.75 * 72))
@@ -1036,17 +893,13 @@ def build_effective_page_map(toc_entries, direct_page_map):
     return effective
 
 
-def build_page_maps(toc_entries, drawings_folder, toc_pages):
+def build_page_maps(toc_entries, drawings_folder, toc_pages, index_pages):
     direct_page_map = [None] * len(toc_entries)
-    current_page = toc_pages
-    index_toc_entry = None
+    current_page = toc_pages + index_pages
 
     for i, entry in enumerate(toc_entries):
         filename = entry.get("filename")
         if not filename:
-            continue
-        if filename == "__INDEX__":
-            index_toc_entry = i
             continue
 
         fpath = os.path.join(drawings_folder, filename)
@@ -1054,9 +907,6 @@ def build_page_maps(toc_entries, drawings_folder, toc_pages):
             reader = PdfReader(fpath)
             direct_page_map[i] = current_page
             current_page += len(reader.pages)
-
-    if index_toc_entry is not None:
-        direct_page_map[index_toc_entry] = current_page
 
     return direct_page_map, build_effective_page_map(toc_entries, direct_page_map)
 
@@ -1766,22 +1616,14 @@ def main():
             }
         )
 
-    drawing_toc_entries = build_hierarchy(raw_entries)
-    index_toc_entry = {
-        "desc": "Index",
-        "item_number": "",
-        "part": "",
-        "filename": "__INDEX__",
-        "parent_index": None,
-    }
-    toc_entries = drawing_toc_entries + [index_toc_entry]
+    toc_entries = build_hierarchy(raw_entries)
     for i, entry in enumerate(toc_entries):
         entry["toc_index"] = i
 
     toc_packet, _, toc_pages = create_directory_pdf_bytes(toc_entries, "Table of Contents", None)
-    index_entries = _build_index_entries(drawing_toc_entries)
+    index_entries = _build_index_entries(toc_entries)
     index_packet, _, index_pages = create_directory_pdf_bytes(index_entries, "Index", None, is_index=True)
-    _, effective_page_map = build_page_maps(toc_entries, drawings_folder, toc_pages)
+    _, effective_page_map = build_page_maps(toc_entries, drawings_folder, toc_pages, index_pages)
 
     toc_packet, toc_placements, _ = create_directory_pdf_bytes(
         toc_entries,
@@ -1796,16 +1638,6 @@ def main():
                 pages.append(page)
         entry["page_text"] = ", ".join(str(page + 1) for page in pages)
     index_packet, index_placements, _ = create_directory_pdf_bytes(index_entries, "Index", None, is_index=True)
-    index_target_map = []
-    for entry in index_entries:
-        target = None
-        for toc_index in entry["toc_indices"]:
-            page = effective_page_map[toc_index]
-            if page is not None:
-                target = page
-                break
-        index_target_map.append(target)
-
     toc_reader = PdfReader(toc_packet)
     index_reader = PdfReader(index_packet)
 
@@ -1814,7 +1646,7 @@ def main():
     if actual_toc_pages != toc_pages or actual_index_pages != index_pages:
         toc_pages = actual_toc_pages
         index_pages = actual_index_pages
-        _, effective_page_map = build_page_maps(toc_entries, drawings_folder, toc_pages)
+        _, effective_page_map = build_page_maps(toc_entries, drawings_folder, toc_pages, index_pages)
 
         toc_packet, toc_placements, _ = create_directory_pdf_bytes(
             toc_entries,
@@ -1829,16 +1661,6 @@ def main():
                     pages.append(page)
             entry["page_text"] = ", ".join(str(page + 1) for page in pages)
         index_packet, index_placements, _ = create_directory_pdf_bytes(index_entries, "Index", None, is_index=True)
-        index_target_map = []
-        for entry in index_entries:
-            target = None
-            for toc_index in entry["toc_indices"]:
-                page = effective_page_map[toc_index]
-                if page is not None:
-                    target = page
-                    break
-            index_target_map.append(target)
-
         toc_reader = PdfReader(toc_packet)
         index_reader = PdfReader(index_packet)
 
@@ -1846,8 +1668,10 @@ def main():
 
     for page in toc_reader.pages:
         writer.add_page(page)
-    drawing_pages_added = 0
-    for entry in drawing_toc_entries:
+    for page in index_reader.pages:
+        writer.add_page(page)
+
+    for entry in toc_entries:
         filename = entry.get("filename")
         if not filename:
             continue
@@ -1859,10 +1683,6 @@ def main():
         reader = PdfReader(fpath)
         for page in reader.pages:
             writer.add_page(page)
-            drawing_pages_added += 1
-
-    for page in index_reader.pages:
-        writer.add_page(page)
 
     bookmark_refs = {}
 
@@ -1885,12 +1705,6 @@ def main():
         bookmark_refs[i] = bookmark
 
     add_toc_hyperlinks(writer, toc_placements, effective_page_map, source_page_offset=0)
-    add_index_hyperlinks(
-        writer,
-        index_placements,
-        index_target_map,
-        source_page_offset=toc_pages + drawing_pages_added,
-    )
 
     total_pages = len(writer.pages)
     for i, page in enumerate(writer.pages):
@@ -1901,7 +1715,7 @@ def main():
 
     # --- Missing drawings report ---
     missing_files = []
-    for entry in drawing_toc_entries:
+    for entry in toc_entries:
         filename = entry.get("filename")
         if filename and filename != "__HYDRAULIC_SCHEMATIC__.pdf":
             fpath = os.path.join(drawings_folder, filename)
