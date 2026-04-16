@@ -5,7 +5,7 @@ from tkinter import filedialog, messagebox, ttk
 
 import pandas as pd
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.0.1"
 
 
 @dataclass
@@ -137,8 +137,9 @@ class ReorderWindow:
         ttk.Button(tools, text="Save As", command=self.save_structure).pack(side="left", padx=(8, 0))
 
         info = (
-            "Reorder a manual structure file (Level/Description/Part Number). "
-            "Move levels up/down, remove a branch, undo remove, then save a new structure file."
+            "Standalone structure editor for existing Excel files "
+            "(Level/Description/Part Number). Reorder levels, add/edit/remove items, "
+            "then save a new structure file."
         )
         ttk.Label(main, text=info, justify="left").pack(anchor="w", pady=(0, 8))
 
@@ -163,6 +164,10 @@ class ReorderWindow:
         actions = ttk.Frame(main)
         actions.pack(fill="x", pady=(10, 0))
 
+        self.add_top_btn = ttk.Button(actions, text="Add Top Level", command=self.on_add_top_level)
+        self.add_child_btn = ttk.Button(actions, text="Add Child", command=self.on_add_child)
+        self.add_sibling_btn = ttk.Button(actions, text="Add Sibling", command=self.on_add_sibling)
+        self.edit_btn = ttk.Button(actions, text="Edit Item", command=self.on_edit_item)
         self.move_up_btn = ttk.Button(actions, text="Move Up", command=self.on_move_up)
         self.move_down_btn = ttk.Button(actions, text="Move Down", command=self.on_move_down)
         self.remove_btn = ttk.Button(actions, text="Remove Level", command=self.on_remove)
@@ -170,6 +175,10 @@ class ReorderWindow:
         self.expand_btn = ttk.Button(actions, text="Expand All", command=self.expand_all)
         self.collapse_btn = ttk.Button(actions, text="Collapse All", command=self.collapse_all)
 
+        self.add_top_btn.pack(side="left")
+        self.add_child_btn.pack(side="left")
+        self.add_sibling_btn.pack(side="left", padx=(8, 0))
+        self.edit_btn.pack(side="left", padx=(8, 0))
         self.move_up_btn.pack(side="left")
         self.move_down_btn.pack(side="left", padx=(8, 0))
         self.remove_btn.pack(side="left", padx=(8, 0))
@@ -253,6 +262,11 @@ class ReorderWindow:
         node = self.selected_node()
         can_edit = node is not None and node.parent is not None
 
+        self.add_top_btn.config(state="normal" if self.model else "disabled")
+        self.add_child_btn.config(state="normal" if self.model and node else "disabled")
+        self.add_sibling_btn.config(state="normal" if can_edit else "disabled")
+        self.edit_btn.config(state="normal" if can_edit else "disabled")
+
         if not can_edit:
             self.move_up_btn.config(state="disabled")
             self.move_down_btn.config(state="disabled")
@@ -265,6 +279,58 @@ class ReorderWindow:
             self.remove_btn.config(state="normal")
 
         self.undo_btn.config(state="normal" if self.undo_stack else "disabled")
+
+    def prompt_item_values(
+        self,
+        title: str,
+        initial_description: str = "",
+        initial_part_number: str = "",
+    ) -> tuple[str, str] | None:
+        dialog = tk.Toplevel(self.root)
+        dialog.title(title)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        frame = ttk.Frame(dialog, padding=12)
+        frame.pack(fill="both", expand=True)
+
+        ttk.Label(frame, text="Description").grid(row=0, column=0, sticky="w", pady=(0, 4))
+        description_var = tk.StringVar(value=initial_description)
+        description_entry = ttk.Entry(frame, textvariable=description_var, width=60)
+        description_entry.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+
+        ttk.Label(frame, text="Part Number").grid(row=2, column=0, sticky="w", pady=(0, 4))
+        part_var = tk.StringVar(value=initial_part_number)
+        part_entry = ttk.Entry(frame, textvariable=part_var, width=60)
+        part_entry.grid(row=3, column=0, sticky="ew")
+
+        buttons = ttk.Frame(frame)
+        buttons.grid(row=4, column=0, sticky="e", pady=(12, 0))
+
+        result: tuple[str, str] | None = None
+
+        def on_ok() -> None:
+            nonlocal result
+            description = description_var.get().strip()
+            if not description:
+                messagebox.showwarning("Missing Description", "Description is required.", parent=dialog)
+                return
+            result = (description, part_var.get().strip())
+            dialog.destroy()
+
+        def on_cancel() -> None:
+            dialog.destroy()
+
+        ttk.Button(buttons, text="Cancel", command=on_cancel).pack(side="right")
+        ttk.Button(buttons, text="OK", command=on_ok).pack(side="right", padx=(0, 8))
+
+        description_entry.focus_set()
+        description_entry.selection_range(0, "end")
+        dialog.bind("<Return>", lambda _e: on_ok())
+        dialog.bind("<Escape>", lambda _e: on_cancel())
+        self.root.wait_window(dialog)
+        return result
 
     def refresh_and_select(self, node: StructureNode | None = None) -> None:
         self.populate_tree()
@@ -279,6 +345,68 @@ class ReorderWindow:
                     break
 
         self.update_buttons()
+
+    def on_add_top_level(self) -> None:
+        if not self.model:
+            return
+
+        values = self.prompt_item_values("Add Top Level")
+        if values is None:
+            return
+
+        description, part_number = values
+        node = StructureNode(level="", description=description, part_number=part_number)
+        self.model.root.add_child(node)
+        self.refresh_and_select(node)
+
+    def on_add_child(self) -> None:
+        if not self.model:
+            return
+
+        parent = self.selected_node()
+        if parent is None:
+            messagebox.showwarning("Select Item", "Select a parent level to add a child.")
+            return
+
+        values = self.prompt_item_values("Add Child")
+        if values is None:
+            return
+
+        description, part_number = values
+        node = StructureNode(level="", description=description, part_number=part_number)
+        parent.add_child(node)
+        self.refresh_and_select(node)
+
+    def on_add_sibling(self) -> None:
+        node = self.selected_node()
+        if not node or not node.parent:
+            return
+
+        values = self.prompt_item_values("Add Sibling")
+        if values is None:
+            return
+
+        description, part_number = values
+        sibling = StructureNode(level="", description=description, part_number=part_number, parent=node.parent)
+        siblings = node.parent.children
+        siblings.insert(siblings.index(node) + 1, sibling)
+        self.refresh_and_select(sibling)
+
+    def on_edit_item(self) -> None:
+        node = self.selected_node()
+        if not node or not node.parent:
+            return
+
+        values = self.prompt_item_values(
+            "Edit Item",
+            initial_description=node.description,
+            initial_part_number=node.part_number,
+        )
+        if values is None:
+            return
+
+        node.description, node.part_number = values
+        self.refresh_and_select(node)
 
     def on_move_up(self) -> None:
         node = self.selected_node()
