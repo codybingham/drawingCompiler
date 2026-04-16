@@ -55,6 +55,16 @@ drawingCompiler/
 - Internal network dependencies for the automated tool are documented in `automated/README.md`.
 
 ## Quick Start
+### Drawing Compiler Studio (Recommended)
+Run the root program to access all workflows from one cohesive GUI:
+
+```bash
+python drawing_compiler_launcher.py
+```
+
+The studio is implemented as a single-file program with unified workflow pages, so the project behaves like one cohesive application.
+
+### Run Individual Tools
 1. Pick the tool (`manual` or `automated`) based on your workflow.
 2. Review the corresponding Markdown readme for requirements and steps.
 3. Run the tool script or packaged executable in your environment.
