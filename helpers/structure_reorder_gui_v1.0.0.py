@@ -205,7 +205,7 @@ class ReorderWindow:
             self.source_file = file_path
             self.undo_stack.clear()
             self.populate_tree()
-            self.expand_all()
+            self.apply_default_tree_layout()
             self.update_buttons()
         except Exception as exc:
             messagebox.showerror("Error", f"Could not open structure file:\n{exc}")
@@ -345,6 +345,12 @@ class ReorderWindow:
                     break
 
         self.update_buttons()
+
+    def apply_default_tree_layout(self) -> None:
+        for top_item in self.tree.get_children(""):
+            self.tree.item(top_item, open=True)
+            for child in self.tree.get_children(top_item):
+                self.tree.item(child, open=False)
 
     def on_add_top_level(self) -> None:
         if not self.model:

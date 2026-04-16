@@ -1478,6 +1478,12 @@ class DrawingCompilerStudio(tk.Tk):
                         self.reorder_tree.see(item_id)
                         break
 
+        def apply_default_tree_layout() -> None:
+            for top_item in self.reorder_tree.get_children():
+                self.reorder_tree.item(top_item, open=True)
+                for child in self.reorder_tree.get_children(top_item):
+                    self.reorder_tree.item(child, open=False)
+
         def prompt_item_values(title: str, initial_description: str = "", initial_part_number: str = "") -> tuple[str, str] | None:
             dialog = tk.Toplevel(self)
             dialog.title(title)
@@ -1519,6 +1525,7 @@ class DrawingCompilerStudio(tk.Tk):
                 self.reorder_source_path = path
                 self.reorder_undo_stack.clear()
                 refresh_tree()
+                apply_default_tree_layout()
             except Exception as exc:
                 messagebox.showerror("Open failed", str(exc), parent=self)
 
