@@ -5,7 +5,7 @@ from tkinter import filedialog, messagebox, ttk
 
 import pandas as pd
 
-APP_VERSION = "1.0.1"
+APP_VERSION = "1.0.2"
 
 
 @dataclass
@@ -131,17 +131,17 @@ class ReorderWindow:
         main.pack(fill="both", expand=True)
 
         tools = ttk.Frame(main)
-        tools.pack(fill="x", pady=(0, 10))
+        tools.pack(fill="x", pady=10)
 
         ttk.Button(tools, text="Open Structure", command=self.load_structure).pack(side="left")
-        ttk.Button(tools, text="Save As", command=self.save_structure).pack(side="left", padx=(8, 0))
+        ttk.Button(tools, text="Save As", command=self.save_structure).pack(side="left", padx=8)
 
         info = (
             "Standalone structure editor for existing Excel files "
             "(Level/Description/Part Number). Reorder levels, add/edit/remove items, "
             "then save a new structure file."
         )
-        ttk.Label(main, text=info, justify="left").pack(anchor="w", pady=(0, 8))
+        ttk.Label(main, text=info, justify="left").pack(anchor="w", pady=8)
 
         tree_frame = ttk.Frame(main)
         tree_frame.pack(fill="both", expand=True)
@@ -162,7 +162,7 @@ class ReorderWindow:
         yscroll.grid(row=0, column=1, sticky="ns")
 
         actions = ttk.Frame(main)
-        actions.pack(fill="x", pady=(10, 0))
+        actions.pack(fill="x", pady=10)
 
         self.add_top_btn = ttk.Button(actions, text="Add Top Level", command=self.on_add_top_level)
         self.add_child_btn = ttk.Button(actions, text="Add Child", command=self.on_add_child)
@@ -177,14 +177,14 @@ class ReorderWindow:
 
         self.add_top_btn.pack(side="left")
         self.add_child_btn.pack(side="left")
-        self.add_sibling_btn.pack(side="left", padx=(8, 0))
-        self.edit_btn.pack(side="left", padx=(8, 0))
+        self.add_sibling_btn.pack(side="left", padx=8)
+        self.edit_btn.pack(side="left", padx=8)
         self.move_up_btn.pack(side="left")
-        self.move_down_btn.pack(side="left", padx=(8, 0))
-        self.remove_btn.pack(side="left", padx=(8, 0))
-        self.undo_btn.pack(side="left", padx=(8, 0))
-        self.expand_btn.pack(side="left", padx=(20, 0))
-        self.collapse_btn.pack(side="left", padx=(8, 0))
+        self.move_down_btn.pack(side="left", padx=8)
+        self.remove_btn.pack(side="left", padx=8)
+        self.undo_btn.pack(side="left", padx=8)
+        self.expand_btn.pack(side="left", padx=20)
+        self.collapse_btn.pack(side="left", padx=8)
 
         self.tree.bind("<<TreeviewSelect>>", lambda _e: self.update_buttons())
         self.root.bind("<Delete>", lambda _e: self.on_remove())
@@ -298,7 +298,7 @@ class ReorderWindow:
         ttk.Label(frame, text="Description").grid(row=0, column=0, sticky="w", pady=(0, 4))
         description_var = tk.StringVar(value=initial_description)
         description_entry = ttk.Entry(frame, textvariable=description_var, width=60)
-        description_entry.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        description_entry.grid(row=1, column=0, sticky="ew", pady=8)
 
         ttk.Label(frame, text="Part Number").grid(row=2, column=0, sticky="w", pady=(0, 4))
         part_var = tk.StringVar(value=initial_part_number)
@@ -323,7 +323,7 @@ class ReorderWindow:
             dialog.destroy()
 
         ttk.Button(buttons, text="Cancel", command=on_cancel).pack(side="right")
-        ttk.Button(buttons, text="OK", command=on_ok).pack(side="right", padx=(0, 8))
+        ttk.Button(buttons, text="OK", command=on_ok).pack(side="right", padx=8)
 
         description_entry.focus_set()
         description_entry.selection_range(0, "end")
