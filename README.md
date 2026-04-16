@@ -23,6 +23,7 @@ Use this when you want to pull drawing PDFs from a structure file using internal
 - Scripts:
   - `helpers/structure_reorder_gui_v1.0.0.py`
   - `helpers/structure_reference_downloader_v1.0.0.py`
+  - `helpers/cad_export_to_structure_v1.0.0.py`
 - Documentation: `helpers/README.md`
 
 Use these when you want to edit existing structure files and/or bulk-download all referenced files.
@@ -39,6 +40,7 @@ drawingCompiler/
 ├── helpers/
 │   ├── structure_reorder_gui_v1.0.0.py
 │   ├── structure_reference_downloader_v1.0.0.py
+│   ├── cad_export_to_structure_v1.0.0.py
 │   └── README.md
 └── manual/
     ├── pdfCombiner_v1.0.0.py
