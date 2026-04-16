@@ -418,23 +418,32 @@ def main():
     if not existing_entries:
         raise Exception("No drawing PDFs found in the selected folder.")
 
-    toc_packet, _, toc_pages = create_directory_pdf_bytes(existing_entries, "Table of Contents", None)
     index_entries = _build_index_entries(existing_entries)
+    toc_entries = existing_entries + [
+        {
+            "desc": "Index",
+            "part": "",
+            "indent_level": 0,
+        }
+    ]
+    toc_packet, _, toc_pages = create_directory_pdf_bytes(toc_entries, "Table of Contents", None)
     index_packet, _, index_pages = create_directory_pdf_bytes(index_entries, "Index", None, is_index=True)
 
     page_offset_map = []
-    current_page = toc_pages + index_pages
+    current_page = toc_pages
 
     for entry in existing_entries:
         fpath = os.path.join(drawing_folder, entry["filename"])
         reader = PdfReader(fpath)
         page_offset_map.append(current_page)
         current_page += len(reader.pages)
+    index_start_page = current_page
+    toc_page_map = page_offset_map + [index_start_page]
 
     toc_packet, toc_placements, _ = create_directory_pdf_bytes(
-        existing_entries,
+        toc_entries,
         "Table of Contents",
-        page_offset_map,
+        toc_page_map,
     )
     for entry in index_entries:
         pages = []
@@ -451,8 +460,6 @@ def main():
 
     for page in toc_reader.pages:
         writer.add_page(page)
-    for page in index_reader.pages:
-        writer.add_page(page)
 
     entry_start_page = {}
     for entry in existing_entries:
@@ -464,6 +471,9 @@ def main():
 
         for page in reader.pages:
             writer.add_page(page)
+
+    for page in index_reader.pages:
+        writer.add_page(page)
 
     bookmark_refs = {}
 
@@ -485,7 +495,7 @@ def main():
         )
         bookmark_refs[id(entry)] = bookmark
 
-    add_toc_hyperlinks(writer, toc_placements, page_offset_map)
+    add_toc_hyperlinks(writer, toc_placements, toc_page_map)
 
     total_pages = len(writer.pages)
 
