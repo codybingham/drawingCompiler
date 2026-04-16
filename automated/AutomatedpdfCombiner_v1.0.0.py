@@ -21,6 +21,7 @@ from pypdf.generic import (
 from reportlab.pdfgen import canvas
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.lib.units import inch
 
 # Suppress only for this session; scoped to avoid global side-effects in larger processes
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
