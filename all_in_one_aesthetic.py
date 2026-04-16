@@ -1596,8 +1596,8 @@ class DrawingCompilerStudio(tk.Tk):
         tool_btn("Collapse all", lambda: self._reorder_expand(False))
 
         # Tree area
-        tree_frame = tk.Frame(self.main_frame, bg=C["bg"], padx=36, pady=(0, 20))
-        tree_frame.pack(fill="both", expand=True)
+        tree_frame = tk.Frame(self.main_frame, bg=C["bg"], padx=36)
+        tree_frame.pack(fill="both", expand=True, pady=(0, 20))
 
         tree_border = tk.Frame(tree_frame, bg=C["border"], bd=0)
         tree_border.pack(fill="both", expand=True)
