@@ -507,8 +507,7 @@ def _layout_directory_entries(entries, is_index=False, desc_font_name="Helvetica
                         item_column_width,
                     )
 
-            page_wrap = is_index and _should_wrap_index_pages(entry)
-            row_span = max(len(desc_lines), len(part_lines), 2 if page_wrap else 1)
+            row_span = max(len(desc_lines), len(part_lines), 1)
 
             if (row_cursor % rows_per_column) + row_span > rows_per_column:
                 row_cursor += rows_per_column - (row_cursor % rows_per_column)
@@ -526,12 +525,10 @@ def _layout_directory_entries(entries, is_index=False, desc_font_name="Helvetica
                 "page_x": page_x,
                 "page_left_x": page_left_x,
                 "y": y,
-                "page_y": y - row_height if page_wrap else y,
                 "title_y": title_y,
                 "row_span": row_span,
                 "desc_lines": desc_lines,
                 "part_lines": part_lines,
-                "page_wrap": page_wrap,
             }
         )
         row_cursor += row_span
@@ -598,17 +595,6 @@ def _wrap_text_to_width(text, font_name, font_size, max_width):
         lines.append(current)
 
     return lines or [text]
-
-
-def _index_page_count(entry):
-    page_text = (entry.get("page_text") or "").strip()
-    if page_text:
-        return len([part for part in page_text.split(",") if part.strip()])
-    return len(entry.get("toc_indices") or [])
-
-
-def _should_wrap_index_pages(entry):
-    return _index_page_count(entry) >= 4
 
 
 def create_directory_pdf_bytes(entries, title, page_offset_map=None, is_index=False):
@@ -685,16 +671,13 @@ def create_directory_pdf_bytes(entries, title, page_offset_map=None, is_index=Fa
                 c.drawRightString(placement["item_x"], placement["y"], item_text)
 
         if page_num:
-            if is_index and placement.get("page_wrap"):
-                c.drawRightString(placement["page_x"], placement["page_y"], page_num)
-            else:
-                page_text = _trim_text_to_width(
-                    page_num,
-                    toc_font_regular,
-                    8,
-                    placement["page_x"] - placement["page_left_x"],
-                )
-                c.drawRightString(placement["page_x"], placement["y"], page_text)
+            page_text = _trim_text_to_width(
+                page_num,
+                toc_font_regular,
+                8,
+                placement["page_x"] - placement["page_left_x"],
+            )
+            c.drawRightString(placement["page_x"], placement["y"], page_text)
 
     if current_page == -1:
         draw_header(page_size[1] - (0.75 * 72))
@@ -893,9 +876,9 @@ def build_effective_page_map(toc_entries, direct_page_map):
     return effective
 
 
-def build_page_maps(toc_entries, drawings_folder, toc_pages, index_pages):
+def build_page_maps(toc_entries, drawings_folder, toc_pages):
     direct_page_map = [None] * len(toc_entries)
-    current_page = toc_pages + index_pages
+    current_page = toc_pages
 
     for i, entry in enumerate(toc_entries):
         filename = entry.get("filename")
@@ -908,7 +891,7 @@ def build_page_maps(toc_entries, drawings_folder, toc_pages, index_pages):
             direct_page_map[i] = current_page
             current_page += len(reader.pages)
 
-    return direct_page_map, build_effective_page_map(toc_entries, direct_page_map)
+    return direct_page_map, build_effective_page_map(toc_entries, direct_page_map), current_page
 
 
 # ---------------------------------------------------------------------------
@@ -1619,16 +1602,27 @@ def main():
     toc_entries = build_hierarchy(raw_entries)
     for i, entry in enumerate(toc_entries):
         entry["toc_index"] = i
+    toc_display_entries = toc_entries + [
+        {
+            "desc": "Index",
+            "item_number": "",
+            "part": "",
+            "indent_level": 0,
+            "parent_index": None,
+            "filename": None,
+        }
+    ]
 
-    toc_packet, _, toc_pages = create_directory_pdf_bytes(toc_entries, "Table of Contents", None)
+    toc_packet, _, toc_pages = create_directory_pdf_bytes(toc_display_entries, "Table of Contents", None)
     index_entries = _build_index_entries(toc_entries)
     index_packet, _, index_pages = create_directory_pdf_bytes(index_entries, "Index", None, is_index=True)
-    _, effective_page_map = build_page_maps(toc_entries, drawings_folder, toc_pages, index_pages)
+    _, effective_page_map, index_start_page = build_page_maps(toc_entries, drawings_folder, toc_pages)
+    toc_page_map = effective_page_map + [index_start_page]
 
     toc_packet, toc_placements, _ = create_directory_pdf_bytes(
-        toc_entries,
+        toc_display_entries,
         "Table of Contents",
-        effective_page_map,
+        toc_page_map,
     )
     for entry in index_entries:
         pages = []
@@ -1646,12 +1640,13 @@ def main():
     if actual_toc_pages != toc_pages or actual_index_pages != index_pages:
         toc_pages = actual_toc_pages
         index_pages = actual_index_pages
-        _, effective_page_map = build_page_maps(toc_entries, drawings_folder, toc_pages, index_pages)
+        _, effective_page_map, index_start_page = build_page_maps(toc_entries, drawings_folder, toc_pages)
+        toc_page_map = effective_page_map + [index_start_page]
 
         toc_packet, toc_placements, _ = create_directory_pdf_bytes(
-            toc_entries,
+            toc_display_entries,
             "Table of Contents",
-            effective_page_map,
+            toc_page_map,
         )
         for entry in index_entries:
             pages = []
@@ -1668,8 +1663,6 @@ def main():
 
     for page in toc_reader.pages:
         writer.add_page(page)
-    for page in index_reader.pages:
-        writer.add_page(page)
 
     for entry in toc_entries:
         filename = entry.get("filename")
@@ -1683,6 +1676,9 @@ def main():
         reader = PdfReader(fpath)
         for page in reader.pages:
             writer.add_page(page)
+
+    for page in index_reader.pages:
+        writer.add_page(page)
 
     bookmark_refs = {}
 
@@ -1704,7 +1700,7 @@ def main():
         )
         bookmark_refs[i] = bookmark
 
-    add_toc_hyperlinks(writer, toc_placements, effective_page_map, source_page_offset=0)
+    add_toc_hyperlinks(writer, toc_placements, toc_page_map, source_page_offset=0)
 
     total_pages = len(writer.pages)
     for i, page in enumerate(writer.pages):
