@@ -3,6 +3,7 @@ import re
 import tkinter as tk
 from dataclasses import dataclass
 from tkinter import filedialog, messagebox, ttk
+from typing import Callable
 
 import pandas as pd
 import requests
@@ -167,7 +168,13 @@ def convert_cad_to_structure(input_path: str, output_path: str) -> dict:
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     out_df.to_excel(output_path, index=False)
 
-    return {"output_path": output_path, "rows_written": len(out_df)}
+    return {
+        "input_path": input_path,
+        "output_path": output_path,
+        "source_rows": len(df),
+        "rows_written": len(out_df),
+        "mapping": {"object_col": object_col, "name_col": name_col, "item_number_col": item_col},
+    }
 
 
 def read_structure_references(structure_path: str) -> tuple[list[str], list[str]]:
@@ -236,7 +243,11 @@ def download_url(session: requests.Session, url: str, out_path: str) -> None:
         f.write(response.content)
 
 
-def download_references(structure_path: str, output_folder: str) -> dict:
+def download_references(
+    structure_path: str,
+    output_folder: str,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+) -> dict:
     os.makedirs(output_folder, exist_ok=True)
     part_numbers, direct_urls = read_structure_references(structure_path)
 
@@ -245,6 +256,11 @@ def download_references(structure_path: str, output_folder: str) -> dict:
 
     downloaded = []
     failed = []
+    total_downloads = len(found_paths) + len(direct_urls)
+    completed_downloads = 0
+
+    if progress_callback:
+        progress_callback(completed_downloads, total_downloads, "Preparing downloads...")
 
     for part, url in found_paths.items():
         target = os.path.join(output_folder, f"{part}.pdf")
@@ -253,6 +269,9 @@ def download_references(structure_path: str, output_folder: str) -> dict:
             downloaded.append(part)
         except Exception:
             failed.append(part)
+        completed_downloads += 1
+        if progress_callback:
+            progress_callback(completed_downloads, total_downloads, f"Downloaded part: {part}")
 
     for url in direct_urls:
         filename = os.path.basename(url.split("?", 1)[0]) or "downloaded_file"
@@ -262,6 +281,9 @@ def download_references(structure_path: str, output_folder: str) -> dict:
             downloaded.append(url)
         except Exception:
             failed.append(url)
+        completed_downloads += 1
+        if progress_callback:
+            progress_callback(completed_downloads, total_downloads, f"Downloaded URL file: {filename}")
 
     return {
         "downloaded": downloaded,
@@ -285,7 +307,12 @@ def _find_pdf_for_part(folder: str, part_number: str) -> str | None:
     return None
 
 
-def build_manual_packet(structure_path: str, drawings_folder: str, output_pdf: str) -> dict:
+def build_manual_packet(
+    structure_path: str,
+    drawings_folder: str,
+    output_pdf: str,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+) -> dict:
     df = pd.read_excel(structure_path)
     level_col = find_column(df, ["Level"])
     desc_col = find_column(df, ["Description", "Name"])
@@ -309,19 +336,26 @@ def build_manual_packet(structure_path: str, drawings_folder: str, output_pdf: s
     missing = []
     included = 0
 
-    for entry in entries:
+    if progress_callback:
+        progress_callback(0, len(entries), "Scanning structure entries...")
+
+    for idx, entry in enumerate(entries, start=1):
         part = entry["part"]
         if not part:
             continue
         pdf_path = _find_pdf_for_part(drawings_folder, part)
         if not pdf_path:
             missing.append(part)
+            if progress_callback:
+                progress_callback(idx, len(entries), f"Missing drawing for {part}")
             continue
 
         reader = PdfReader(pdf_path)
         for page in reader.pages:
             writer.add_page(page)
         included += 1
+        if progress_callback:
+            progress_callback(idx, len(entries), f"Added {part}")
 
     if not writer.pages:
         raise ValueError("No PDFs were added. Check your drawings folder and part numbers.")
@@ -333,9 +367,28 @@ def build_manual_packet(structure_path: str, drawings_folder: str, output_pdf: s
     return {"output_pdf": output_pdf, "included_parts": included, "missing_parts": missing}
 
 
-def build_automated_packet(structure_path: str, temp_download_folder: str, output_pdf: str) -> dict:
-    download_result = download_references(structure_path, temp_download_folder)
-    packet_result = build_manual_packet(structure_path, temp_download_folder, output_pdf)
+def build_automated_packet(
+    structure_path: str,
+    temp_download_folder: str,
+    output_pdf: str,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+) -> dict:
+    def phase_download(completed: int, total: int, message: str) -> None:
+        if progress_callback:
+            progress_callback(completed, total if total > 0 else 1, f"Download phase: {message}")
+
+    download_result = download_references(structure_path, temp_download_folder, progress_callback=phase_download)
+
+    def phase_build(completed: int, total: int, message: str) -> None:
+        if progress_callback:
+            progress_callback(completed, total if total > 0 else 1, f"Build phase: {message}")
+
+    packet_result = build_manual_packet(
+        structure_path,
+        temp_download_folder,
+        output_pdf,
+        progress_callback=phase_build,
+    )
     return {
         "output_pdf": packet_result["output_pdf"],
         "included_parts": packet_result["included_parts"],
@@ -383,6 +436,182 @@ def renumber_structure(df: pd.DataFrame) -> pd.DataFrame:
             }
         )
     return pd.DataFrame(output, columns=["Level", "Description", "Part Number"])
+
+
+@dataclass
+class StructureNode:
+    level: str
+    description: str
+    part_number: str
+    children: list["StructureNode"]
+    parent: "StructureNode | None" = None
+
+    def __init__(self, level: str, description: str, part_number: str) -> None:
+        self.level = level
+        self.description = description
+        self.part_number = part_number
+        self.children = []
+        self.parent = None
+
+    def add_child(self, child: "StructureNode") -> None:
+        child.parent = self
+        self.children.append(child)
+
+
+class StructureModel:
+    def __init__(self) -> None:
+        self.root = StructureNode(level="", description="ROOT", part_number="")
+
+    @classmethod
+    def from_dataframe(cls, df: pd.DataFrame) -> "StructureModel":
+        required = ["Level", "Description", "Part Number"]
+        for col in required:
+            if col not in df.columns:
+                raise ValueError(f"Missing required column: {col}")
+
+        model = cls()
+        by_code = {tuple(): model.root}
+        rows = []
+        for _, row in df.iterrows():
+            level = "" if pd.isna(row["Level"]) else str(row["Level"]).strip()
+            if not level:
+                continue
+            rows.append(
+                {
+                    "level": level,
+                    "code": parse_level_code(level),
+                    "description": "" if pd.isna(row["Description"]) else str(row["Description"]).strip(),
+                    "part": "" if pd.isna(row["Part Number"]) else str(row["Part Number"]).strip(),
+                }
+            )
+
+        rows.sort(key=lambda r: r["code"])
+        for row in rows:
+            code = row["code"]
+            search = code[:-1]
+            parent = None
+            while search:
+                if search in by_code:
+                    parent = by_code[search]
+                    break
+                search = search[:-1]
+            if parent is None:
+                parent = model.root
+
+            node = StructureNode(level=row["level"], description=row["description"], part_number=row["part"])
+            parent.add_child(node)
+            by_code[code] = node
+
+        if not model.root.children:
+            raise ValueError("No valid rows found in the structure file.")
+        return model
+
+    def to_dataframe(self) -> pd.DataFrame:
+        rows = []
+
+        def walk(nodes: list[StructureNode], prefix: list[int]) -> None:
+            for idx, node in enumerate(nodes, start=1):
+                level = ".".join(str(x) for x in (prefix + [idx]))
+                rows.append({"Level": level, "Description": node.description, "Part Number": node.part_number})
+                walk(node.children, prefix + [idx])
+
+        walk(self.root.children, [])
+        return pd.DataFrame(rows, columns=["Level", "Description", "Part Number"])
+
+
+def default_output_path(input_path: str, suffix: str, extension: str) -> str:
+    if not input_path:
+        return ""
+    base = os.path.splitext(os.path.basename(input_path))[0]
+    return os.path.join(os.path.dirname(input_path), f"{base}{suffix}{extension}")
+
+
+def summarize_list(values: list[str], limit: int = 10) -> str:
+    if not values:
+        return "None"
+    shown = values[:limit]
+    remaining = len(values) - len(shown)
+    lines = [f"- {item}" for item in shown]
+    if remaining > 0:
+        lines.append(f"... and {remaining} more")
+    return "\n".join(lines)
+
+
+def validate_output_filename(filename: str) -> str:
+    invalid_chars_pattern = r'[<>:"/\\|?*]'
+    reserved_names = {
+        "CON",
+        "PRN",
+        "AUX",
+        "NUL",
+        "COM1",
+        "COM2",
+        "COM3",
+        "COM4",
+        "COM5",
+        "COM6",
+        "COM7",
+        "COM8",
+        "COM9",
+        "LPT1",
+        "LPT2",
+        "LPT3",
+        "LPT4",
+        "LPT5",
+        "LPT6",
+        "LPT7",
+        "LPT8",
+        "LPT9",
+    }
+    name = os.path.basename(filename).strip()
+    if not name:
+        raise ValueError("Output file name cannot be blank.")
+    if re.search(invalid_chars_pattern, name):
+        raise ValueError('Output file name contains invalid characters: <>:"/\\|?*')
+    if name.endswith(" ") or name.endswith("."):
+        raise ValueError("Output file name cannot end with a space or period.")
+    base_name = os.path.splitext(name)[0].upper()
+    if base_name in reserved_names:
+        raise ValueError(f'"{base_name}" is a reserved Windows file name.')
+    return name
+
+
+class ProgressDialog:
+    def __init__(self, parent: tk.Misc, title: str) -> None:
+        self.parent = parent
+        self.window = tk.Toplevel(parent)
+        self.window.title(title)
+        self.window.resizable(False, False)
+        self.window.transient(parent)
+        self.window.grab_set()
+
+        frame = ttk.Frame(self.window, padding=14)
+        frame.pack(fill="both", expand=True)
+
+        self.status_var = tk.StringVar(value="Starting...")
+        ttk.Label(frame, textvariable=self.status_var, width=72).pack(anchor="w", pady=(0, 8))
+
+        self.progress_var = tk.DoubleVar(value=0)
+        progress = ttk.Progressbar(
+            frame,
+            orient="horizontal",
+            mode="determinate",
+            length=520,
+            variable=self.progress_var,
+            maximum=100,
+        )
+        progress.pack(fill="x")
+
+        self.window.update_idletasks()
+
+    def update(self, completed: int, total: int, message: str) -> None:
+        self.status_var.set(message)
+        self.progress_var.set((completed / total) * 100 if total else 0)
+        self.parent.update_idletasks()
+
+    def close(self) -> None:
+        if self.window.winfo_exists():
+            self.window.destroy()
 
 
 class DrawingCompilerStudio(tk.Tk):
@@ -506,6 +735,36 @@ class DrawingCompilerStudio(tk.Tk):
         ttk.Entry(parent, textvariable=var, width=88).grid(row=row + 1, column=0, sticky="ew", padx=(0, 8))
         ttk.Button(parent, text=browse_text, command=browse_cmd).grid(row=row + 1, column=1)
 
+    def _set_structure_and_default_output(
+        self,
+        structure_var: tk.StringVar,
+        output_var: tk.StringVar,
+        output_suffix: str,
+        extension: str,
+        filetypes: list[tuple[str, str]],
+    ) -> None:
+        path = filedialog.askopenfilename(filetypes=filetypes)
+        if not path:
+            return
+        structure_var.set(path)
+        if not output_var.get().strip():
+            output_var.set(default_output_path(path, output_suffix, extension))
+
+    def _set_input_and_default_output(
+        self,
+        input_var: tk.StringVar,
+        output_var: tk.StringVar,
+        output_suffix: str,
+        extension: str,
+        filetypes: list[tuple[str, str]],
+    ) -> None:
+        path = filedialog.askopenfilename(filetypes=filetypes)
+        if not path:
+            return
+        input_var.set(path)
+        if not output_var.get().strip():
+            output_var.set(default_output_path(path, output_suffix, extension))
+
     def _manual_packet_page(self) -> None:
         card = self._card("Manual Packet Builder", "Build a merged PDF packet from structure rows and local drawing PDFs.")
 
@@ -517,7 +776,13 @@ class DrawingCompilerStudio(tk.Tk):
             form,
             "Structure workbook",
             structure_var,
-            lambda: structure_var.set(filedialog.askopenfilename(filetypes=[("Excel", "*.xlsx *.xlsm *.xls"), ("All", "*.*")]) or structure_var.get()),
+            lambda: self._set_structure_and_default_output(
+                structure_var,
+                output_var,
+                "_packet",
+                ".pdf",
+                [("Excel", "*.xlsx *.xlsm *.xls"), ("All", "*.*")],
+            ),
             0,
         )
         self._path_row(
@@ -543,14 +808,36 @@ class DrawingCompilerStudio(tk.Tk):
                 messagebox.showwarning("Missing data", "Choose structure file, drawings folder, and output PDF.", parent=self)
                 return
             try:
-                result = build_manual_packet(structure_var.get(), drawings_var.get(), output_var.get())
+                validate_output_filename(output_var.get())
+            except ValueError as exc:
+                messagebox.showerror("Invalid Output Filename", str(exc), parent=self)
+                return
+            progress = ProgressDialog(self, "Building Manual Packet")
+            try:
+                result = build_manual_packet(
+                    structure_var.get(),
+                    drawings_var.get(),
+                    output_var.get(),
+                    progress_callback=progress.update,
+                )
                 messagebox.showinfo(
                     "Packet complete",
-                    f"Output: {result['output_pdf']}\nIncluded parts: {result['included_parts']}\nMissing parts: {len(result['missing_parts'])}",
+                    "\n".join(
+                        [
+                            f"Output: {result['output_pdf']}",
+                            f"Included parts: {result['included_parts']}",
+                            f"Missing parts: {len(result['missing_parts'])}",
+                            "",
+                            "Missing part list:",
+                            summarize_list(result["missing_parts"]),
+                        ]
+                    ),
                     parent=self,
                 )
             except Exception as exc:
                 messagebox.showerror("Build failed", str(exc), parent=self)
+            finally:
+                progress.close()
 
         ttk.Button(card, text="Build Manual Packet", style="Primary.TButton", command=run_manual).pack(anchor="w", pady=(12, 0))
 
@@ -565,7 +852,13 @@ class DrawingCompilerStudio(tk.Tk):
             form,
             "Structure workbook",
             structure_var,
-            lambda: structure_var.set(filedialog.askopenfilename(filetypes=[("Excel", "*.xlsx *.xlsm *.xls"), ("All", "*.*")]) or structure_var.get()),
+            lambda: self._set_structure_and_default_output(
+                structure_var,
+                output_var,
+                "_automated_packet",
+                ".pdf",
+                [("Excel", "*.xlsx *.xlsm *.xls"), ("All", "*.*")],
+            ),
             0,
         )
         self._path_row(
@@ -591,15 +884,41 @@ class DrawingCompilerStudio(tk.Tk):
                 messagebox.showwarning("Missing data", "Choose structure, download folder, and output PDF.", parent=self)
                 return
             try:
-                result = build_automated_packet(structure_var.get(), download_var.get(), output_var.get())
+                validate_output_filename(output_var.get())
+            except ValueError as exc:
+                messagebox.showerror("Invalid Output Filename", str(exc), parent=self)
+                return
+            progress = ProgressDialog(self, "Running Automated Build")
+            try:
+                result = build_automated_packet(
+                    structure_var.get(),
+                    download_var.get(),
+                    output_var.get(),
+                    progress_callback=progress.update,
+                )
                 messagebox.showinfo(
                     "Automated build complete",
-                    f"Output: {result['output_pdf']}\nIncluded: {result['included_parts']}\n"
-                    f"Missing in packet: {len(result['missing_parts'])}\nDownload failures: {len(result['failed_downloads'])}",
+                    "\n".join(
+                        [
+                            f"Output: {result['output_pdf']}",
+                            f"Included: {result['included_parts']}",
+                            f"Missing in packet: {len(result['missing_parts'])}",
+                            f"Download failures: {len(result['failed_downloads'])}",
+                            f"Not found in lookup: {len(result['not_found'])}",
+                            "",
+                            "Missing in packet:",
+                            summarize_list(result["missing_parts"]),
+                            "",
+                            "Lookup not found:",
+                            summarize_list(result["not_found"]),
+                        ]
+                    ),
                     parent=self,
                 )
             except Exception as exc:
                 messagebox.showerror("Automated build failed", str(exc), parent=self)
+            finally:
+                progress.close()
 
         ttk.Button(card, text="Run Automated Build", style="Primary.TButton", command=run_auto).pack(anchor="w", pady=(12, 0))
 
@@ -613,8 +932,12 @@ class DrawingCompilerStudio(tk.Tk):
             form,
             "Input CAD export",
             input_var,
-            lambda: input_var.set(
-                filedialog.askopenfilename(filetypes=[("Supported", "*.xlsx *.xlsm *.xls *.csv"), ("All", "*.*")]) or input_var.get()
+            lambda: self._set_input_and_default_output(
+                input_var,
+                output_var,
+                "_structure",
+                ".xlsx",
+                [("Supported", "*.xlsx *.xlsm *.xls *.csv"), ("All", "*.*")],
             ),
             0,
         )
@@ -635,86 +958,238 @@ class DrawingCompilerStudio(tk.Tk):
                 return
             try:
                 result = convert_cad_to_structure(input_var.get(), output_var.get())
-                messagebox.showinfo("Conversion complete", f"Wrote: {result['output_path']}\nRows: {result['rows_written']}", parent=self)
+                mapping = result["mapping"]
+                messagebox.showinfo(
+                    "Conversion complete",
+                    "\n".join(
+                        [
+                            f"Input: {result['input_path']}",
+                            f"Output: {result['output_path']}",
+                            f"Rows read: {result['source_rows']}",
+                            f"Rows written: {result['rows_written']}",
+                            "",
+                            "Detected columns:",
+                            f"- Object: {mapping['object_col']}",
+                            f"- Name: {mapping['name_col']}",
+                            f"- Item Number: {mapping['item_number_col']}",
+                        ]
+                    ),
+                    parent=self,
+                )
             except Exception as exc:
                 messagebox.showerror("Conversion failed", str(exc), parent=self)
 
         ttk.Button(card, text="Generate Structure", style="Primary.TButton", command=run_conversion).pack(anchor="w", pady=(12, 0))
 
     def _reorder_page(self) -> None:
-        card = self._card("Structure Reorder", "Load a structure, move rows up/down, then save with renumbered levels.")
+        card = self._card("Structure Reorder", "Full editor: reorder, add, edit, remove, undo remove, then save renumbered output.")
+        self.reorder_model: StructureModel | None = None
+        self.reorder_source_path: str | None = None
+        self.reorder_item_lookup: dict[str, StructureNode] = {}
+        self.reorder_undo_stack: list[tuple[StructureNode, StructureNode, int]] = []
 
-        controls = ttk.Frame(card, style="Card.TFrame")
-        controls.pack(fill="x")
+        tools = ttk.Frame(card, style="Card.TFrame")
+        tools.pack(fill="x", pady=(0, 8))
 
         tree_frame = ttk.Frame(card, style="Card.TFrame")
-        tree_frame.pack(fill="both", expand=True, pady=(10, 0))
-
-        self.reorder_tree = ttk.Treeview(tree_frame, columns=("level", "part"), show="headings", selectmode="browse")
-        self.reorder_tree.heading("level", text="Level")
+        tree_frame.pack(fill="both", expand=True)
+        self.reorder_tree = ttk.Treeview(tree_frame, columns=("part",), show="tree headings", selectmode="browse")
+        self.reorder_tree.heading("#0", text="Description")
         self.reorder_tree.heading("part", text="Part Number")
-        self.reorder_tree.column("level", width=160)
-        self.reorder_tree.column("part", width=220)
+        self.reorder_tree.column("#0", width=700, anchor="w")
+        self.reorder_tree.column("part", width=220, anchor="w")
         self.reorder_tree.pack(side="left", fill="both", expand=True)
-
         scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=self.reorder_tree.yview)
         self.reorder_tree.configure(yscrollcommand=scroll.set)
         scroll.pack(side="left", fill="y")
 
-        def refresh_tree() -> None:
-            for item in self.reorder_tree.get_children(""):
+        actions = ttk.Frame(card, style="Card.TFrame")
+        actions.pack(fill="x", pady=(8, 0))
+
+        def selected_node() -> StructureNode | None:
+            sel = self.reorder_tree.selection()
+            return self.reorder_item_lookup.get(sel[0]) if sel else None
+
+        def refresh_tree(select_node: StructureNode | None = None) -> None:
+            for item in self.reorder_tree.get_children():
                 self.reorder_tree.delete(item)
-            if self.reorder_df is None:
+            self.reorder_item_lookup.clear()
+            if not self.reorder_model:
                 return
-            for idx, row in self.reorder_df.iterrows():
-                text = row["Description"]
-                self.reorder_tree.insert("", "end", iid=str(idx), values=(row["Level"], row["Part Number"]), text=text)
+
+            def add_nodes(parent_id: str, nodes: list[StructureNode]) -> None:
+                for node in nodes:
+                    item_id = self.reorder_tree.insert(parent_id, "end", text=node.description, values=(node.part_number,), open=True)
+                    self.reorder_item_lookup[item_id] = node
+                    add_nodes(item_id, node.children)
+
+            add_nodes("", self.reorder_model.root.children)
+            if select_node:
+                for item_id, node in self.reorder_item_lookup.items():
+                    if node is select_node:
+                        self.reorder_tree.selection_set(item_id)
+                        self.reorder_tree.focus(item_id)
+                        self.reorder_tree.see(item_id)
+                        break
+
+        def prompt_item_values(title: str, initial_description: str = "", initial_part_number: str = "") -> tuple[str, str] | None:
+            dialog = tk.Toplevel(self)
+            dialog.title(title)
+            dialog.transient(self)
+            dialog.grab_set()
+            frame = ttk.Frame(dialog, padding=12)
+            frame.pack(fill="both", expand=True)
+            ttk.Label(frame, text="Description").grid(row=0, column=0, sticky="w")
+            desc_var = tk.StringVar(value=initial_description)
+            ttk.Entry(frame, textvariable=desc_var, width=60).grid(row=1, column=0, sticky="ew", pady=(0, 8))
+            ttk.Label(frame, text="Part Number").grid(row=2, column=0, sticky="w")
+            part_var = tk.StringVar(value=initial_part_number)
+            ttk.Entry(frame, textvariable=part_var, width=60).grid(row=3, column=0, sticky="ew")
+            result: tuple[str, str] | None = None
+
+            def on_ok() -> None:
+                nonlocal result
+                desc = desc_var.get().strip()
+                if not desc:
+                    messagebox.showwarning("Missing Description", "Description is required.", parent=dialog)
+                    return
+                result = (desc, part_var.get().strip())
+                dialog.destroy()
+
+            btns = ttk.Frame(frame)
+            btns.grid(row=4, column=0, sticky="e", pady=(10, 0))
+            ttk.Button(btns, text="Cancel", command=dialog.destroy).pack(side="right")
+            ttk.Button(btns, text="OK", command=on_ok).pack(side="right", padx=(0, 8))
+            self.wait_window(dialog)
+            return result
 
         def open_file() -> None:
             path = filedialog.askopenfilename(filetypes=[("Excel", "*.xlsx *.xlsm *.xls"), ("All", "*.*")])
             if not path:
                 return
             try:
-                self.reorder_df = load_structure_for_reorder(path)
+                df = load_structure_for_reorder(path)
+                self.reorder_model = StructureModel.from_dataframe(df)
                 self.reorder_source_path = path
+                self.reorder_undo_stack.clear()
                 refresh_tree()
             except Exception as exc:
                 messagebox.showerror("Open failed", str(exc), parent=self)
 
+        def add_top() -> None:
+            if not self.reorder_model:
+                return
+            values = prompt_item_values("Add Top Level")
+            if not values:
+                return
+            node = StructureNode(level="", description=values[0], part_number=values[1])
+            self.reorder_model.root.add_child(node)
+            refresh_tree(node)
+
+        def add_child() -> None:
+            node = selected_node()
+            if not node:
+                return
+            values = prompt_item_values("Add Child")
+            if not values:
+                return
+            new_node = StructureNode(level="", description=values[0], part_number=values[1])
+            node.add_child(new_node)
+            refresh_tree(new_node)
+
+        def add_sibling() -> None:
+            node = selected_node()
+            if not node or not node.parent:
+                return
+            values = prompt_item_values("Add Sibling")
+            if not values:
+                return
+            siblings = node.parent.children
+            idx = siblings.index(node) + 1
+            new_node = StructureNode(level="", description=values[0], part_number=values[1])
+            new_node.parent = node.parent
+            siblings.insert(idx, new_node)
+            refresh_tree(new_node)
+
+        def edit_item() -> None:
+            node = selected_node()
+            if not node:
+                return
+            values = prompt_item_values("Edit Item", node.description, node.part_number)
+            if not values:
+                return
+            node.description, node.part_number = values
+            refresh_tree(node)
+
         def move(delta: int) -> None:
-            if self.reorder_df is None:
+            node = selected_node()
+            if not node or not node.parent:
                 return
-            selected = self.reorder_tree.selection()
-            if not selected:
-                return
-            idx = int(selected[0])
+            siblings = node.parent.children
+            idx = siblings.index(node)
             new_idx = idx + delta
-            if new_idx < 0 or new_idx >= len(self.reorder_df):
+            if new_idx < 0 or new_idx >= len(siblings):
                 return
-            rows = self.reorder_df.to_dict("records")
-            rows[idx], rows[new_idx] = rows[new_idx], rows[idx]
-            self.reorder_df = pd.DataFrame(rows)
+            siblings[idx], siblings[new_idx] = siblings[new_idx], siblings[idx]
+            refresh_tree(node)
+
+        def remove_item() -> None:
+            node = selected_node()
+            if not node or not node.parent:
+                return
+            siblings = node.parent.children
+            idx = siblings.index(node)
+            siblings.pop(idx)
+            self.reorder_undo_stack.append((node.parent, node, idx))
             refresh_tree()
-            self.reorder_tree.selection_set(str(new_idx))
+
+        def undo_remove() -> None:
+            if not self.reorder_undo_stack:
+                return
+            parent, node, idx = self.reorder_undo_stack.pop()
+            node.parent = parent
+            parent.children.insert(idx, node)
+            refresh_tree(node)
 
         def save_file() -> None:
-            if self.reorder_df is None:
+            if not self.reorder_model:
                 messagebox.showwarning("No data", "Open a structure file first.", parent=self)
                 return
-            path = filedialog.asksaveasfilename(defaultextension=".xlsx", filetypes=[("Excel", "*.xlsx")])
+            initial = "reordered_structure.xlsx"
+            if self.reorder_source_path:
+                stem = os.path.splitext(os.path.basename(self.reorder_source_path))[0]
+                initial = f"{stem}_reordered.xlsx"
+            path = filedialog.asksaveasfilename(defaultextension=".xlsx", initialfile=initial, filetypes=[("Excel", "*.xlsx")])
             if not path:
                 return
             try:
-                out_df = renumber_structure(self.reorder_df)
-                out_df.to_excel(path, index=False)
+                self.reorder_model.to_dataframe().to_excel(path, index=False)
                 messagebox.showinfo("Saved", f"Saved reordered structure:\n{path}", parent=self)
             except Exception as exc:
                 messagebox.showerror("Save failed", str(exc), parent=self)
 
-        ttk.Button(controls, text="Open Structure", command=open_file).pack(side="left")
-        ttk.Button(controls, text="Move Up", command=lambda: move(-1)).pack(side="left", padx=(8, 0))
-        ttk.Button(controls, text="Move Down", command=lambda: move(1)).pack(side="left", padx=(8, 0))
-        ttk.Button(controls, text="Save Reordered", style="Primary.TButton", command=save_file).pack(side="left", padx=(14, 0))
+        def expand_all() -> None:
+            for item in self.reorder_tree.get_children():
+                self.reorder_tree.item(item, open=True)
+                for child in self.reorder_tree.get_children(item):
+                    self.reorder_tree.item(child, open=True)
+
+        def collapse_all() -> None:
+            for item in self.reorder_tree.get_children():
+                self.reorder_tree.item(item, open=False)
+
+        ttk.Button(tools, text="Open Structure", command=open_file).pack(side="left")
+        ttk.Button(tools, text="Save As", command=save_file).pack(side="left", padx=(8, 0))
+        ttk.Button(actions, text="Add Top Level", command=add_top).pack(side="left")
+        ttk.Button(actions, text="Add Child", command=add_child).pack(side="left", padx=(8, 0))
+        ttk.Button(actions, text="Add Sibling", command=add_sibling).pack(side="left", padx=(8, 0))
+        ttk.Button(actions, text="Edit Item", command=edit_item).pack(side="left", padx=(8, 0))
+        ttk.Button(actions, text="Move Up", command=lambda: move(-1)).pack(side="left", padx=(8, 0))
+        ttk.Button(actions, text="Move Down", command=lambda: move(1)).pack(side="left", padx=(8, 0))
+        ttk.Button(actions, text="Remove", command=remove_item).pack(side="left", padx=(8, 0))
+        ttk.Button(actions, text="Undo Remove", command=undo_remove).pack(side="left", padx=(8, 0))
+        ttk.Button(actions, text="Expand All", command=expand_all).pack(side="left", padx=(20, 0))
+        ttk.Button(actions, text="Collapse All", command=collapse_all).pack(side="left", padx=(8, 0))
 
     def _reference_page(self) -> None:
         card = self._card("Reference Downloader", "Download drawings by part/URL references from a structure workbook.")
@@ -727,7 +1202,9 @@ class DrawingCompilerStudio(tk.Tk):
             form,
             "Structure workbook",
             structure_var,
-            lambda: structure_var.set(filedialog.askopenfilename(filetypes=[("Excel", "*.xlsx *.xlsm *.xls"), ("All", "*.*")]) or structure_var.get()),
+            lambda: structure_var.set(
+                filedialog.askopenfilename(filetypes=[("Excel", "*.xlsx *.xlsm *.xls"), ("All", "*.*")]) or structure_var.get()
+            ),
             0,
         )
         self._path_row(
@@ -743,15 +1220,30 @@ class DrawingCompilerStudio(tk.Tk):
             if not structure_var.get() or not output_var.get():
                 messagebox.showwarning("Missing data", "Choose structure file and output folder.", parent=self)
                 return
+            progress = ProgressDialog(self, "Downloading References")
             try:
-                result = download_references(structure_var.get(), output_var.get())
+                result = download_references(structure_var.get(), output_var.get(), progress_callback=progress.update)
                 messagebox.showinfo(
                     "Download complete",
-                    f"Downloaded: {len(result['downloaded'])}\nNot found: {len(result['missing_parts'])}\nFailed: {len(result['failed'])}",
+                    "\n".join(
+                        [
+                            f"Downloaded: {len(result['downloaded'])}",
+                            f"Not found: {len(result['missing_parts'])}",
+                            f"Failed: {len(result['failed'])}",
+                            "",
+                            "Part numbers not found:",
+                            summarize_list(result["missing_parts"]),
+                            "",
+                            "Failed downloads:",
+                            summarize_list(result["failed"]),
+                        ]
+                    ),
                     parent=self,
                 )
             except Exception as exc:
                 messagebox.showerror("Download failed", str(exc), parent=self)
+            finally:
+                progress.close()
 
         ttk.Button(card, text="Download References", style="Primary.TButton", command=run_download).pack(anchor="w", pady=(12, 0))
 
