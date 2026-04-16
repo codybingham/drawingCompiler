@@ -397,11 +397,17 @@ def build_hierarchy(entries):
 def _get_toc_fonts():
     """Defer font registration until actually needed."""
     candidates = [
-        ("Arial", "Arial-Bold", r"C:\Windows\Fonts\arial.ttf", r"C:\Windows\Fonts\arialbd.ttf"),
-        ("ArialMT", "Arial-BoldMT", r"C:\Windows\Fonts\Arial.ttf", r"C:\Windows\Fonts\Arialbd.ttf"),
+        (r"C:\Windows\Fonts\arial.ttf", r"C:\Windows\Fonts\arialbd.ttf"),
+        (r"C:\Windows\Fonts\Arial.ttf", r"C:\Windows\Fonts\Arialbd.ttf"),
+        ("/usr/share/fonts/truetype/msttcorefonts/Arial.ttf", "/usr/share/fonts/truetype/msttcorefonts/Arial_Bold.ttf"),
+        ("/usr/share/fonts/truetype/msttcorefonts/arial.ttf", "/usr/share/fonts/truetype/msttcorefonts/arialbd.ttf"),
+        ("/Library/Fonts/Arial.ttf", "/Library/Fonts/Arial Bold.ttf"),
     ]
 
-    for regular_name, bold_name, regular_path, bold_path in candidates:
+    regular_name = "Arial"
+    bold_name = "Arial-Bold"
+
+    for regular_path, bold_path in candidates:
         if os.path.exists(regular_path) and os.path.exists(bold_path):
             try:
                 if regular_name not in pdfmetrics.getRegisteredFontNames():
@@ -438,7 +444,7 @@ def _build_index_entries(toc_entries):
     return sorted(grouped.values(), key=lambda entry: entry["desc"].casefold())
 
 
-def _layout_directory_entries(entries, is_index=False):
+def _layout_directory_entries(entries, is_index=False, desc_font_name="Helvetica", desc_font_size=7):
     from reportlab.lib.pagesizes import letter, landscape
     from reportlab.lib.units import inch
 
@@ -463,26 +469,44 @@ def _layout_directory_entries(entries, is_index=False):
     placements = []
     row_cursor = 0
     for idx, entry in enumerate(entries):
-        row_span = 2 if (is_index and _should_wrap_index_pages(entry)) else 1
-        if (row_cursor % rows_per_column) + row_span > rows_per_column:
-            row_cursor += rows_per_column - (row_cursor % rows_per_column)
+        while True:
+            per_page_row = row_cursor % rows_per_page
+            page_index = row_cursor // rows_per_page
+            col_index = per_page_row // rows_per_column
+            row_index = per_page_row % rows_per_column
 
-        per_page_row = row_cursor % rows_per_page
-        page_index = row_cursor // rows_per_page
-        col_index = per_page_row // rows_per_column
-        row_index = per_page_row % rows_per_column
+            column_left = column_lefts[col_index]
+            column_right = column_left + column_width
+            title_y = height - margin_top
+            y = title_y - 0.45 * inch - row_index * row_height
+            desc_x = column_left + (0 if is_index else entry["indent_level"] * indent_step)
+            page_x = column_right - 4
+            page_column_width = (1.35 * inch) if is_index else (0.62 * inch)
+            item_column_width = 0.9 * inch if is_index else 1.05 * inch
+            page_left_x = column_right - page_column_width
+            item_x = page_left_x - 8
+            item_left_x = item_x - item_column_width
 
-        column_left = column_lefts[col_index]
-        column_right = column_left + column_width
-        title_y = height - margin_top
-        y = title_y - 0.45 * inch - row_index * row_height
-        desc_x = column_left + (0 if is_index else entry["indent_level"] * indent_step)
-        page_x = column_right - 4
-        page_column_width = (1.35 * inch) if is_index else (0.62 * inch)
-        item_column_width = 0.9 * inch if is_index else 1.05 * inch
-        page_left_x = column_right - page_column_width
-        item_x = page_left_x - 8
-        item_left_x = item_x - item_column_width
+            desc_right_limit = item_left_x - 8
+            desc_max_width = max(0, desc_right_limit - desc_x)
+            if is_index:
+                desc_lines = [str(entry["desc"] or "")]
+            else:
+                desc_lines = _wrap_text_to_width(
+                    entry["desc"],
+                    desc_font_name,
+                    desc_font_size,
+                    desc_max_width,
+                )
+            row_span = max(
+                len(desc_lines),
+                2 if (is_index and _should_wrap_index_pages(entry)) else 1,
+            )
+
+            if (row_cursor % rows_per_column) + row_span > rows_per_column:
+                row_cursor += rows_per_column - (row_cursor % rows_per_column)
+                continue
+            break
 
         placements.append(
             {
@@ -498,6 +522,7 @@ def _layout_directory_entries(entries, is_index=False):
                 "page_y": y - row_height if row_span > 1 else y,
                 "title_y": title_y,
                 "row_span": row_span,
+                "desc_lines": desc_lines,
             }
         )
         row_cursor += row_span
@@ -525,6 +550,47 @@ def _trim_text_to_width(text, font_name, font_size, max_width):
     return f"{trimmed}{ellipsis}"
 
 
+def _wrap_text_to_width(text, font_name, font_size, max_width):
+    text = str(text or "")
+    if max_width <= 0:
+        return [text]
+    if not text:
+        return [""]
+
+    lines = []
+    current = ""
+    for word in text.split():
+        candidate = word if not current else f"{current} {word}"
+        if pdfmetrics.stringWidth(candidate, font_name, font_size) <= max_width:
+            current = candidate
+            continue
+
+        if current:
+            lines.append(current)
+            current = ""
+
+        if pdfmetrics.stringWidth(word, font_name, font_size) <= max_width:
+            current = word
+            continue
+
+        split_word = word
+        while split_word:
+            chunk = split_word
+            while chunk and pdfmetrics.stringWidth(chunk, font_name, font_size) > max_width:
+                chunk = chunk[:-1]
+            if not chunk:
+                lines.append(split_word[:1])
+                split_word = split_word[1:]
+            else:
+                lines.append(chunk)
+                split_word = split_word[len(chunk):]
+
+    if current:
+        lines.append(current)
+
+    return lines or [text]
+
+
 def _index_page_count(entry):
     page_text = (entry.get("page_text") or "").strip()
     if page_text:
@@ -538,9 +604,15 @@ def _should_wrap_index_pages(entry):
 
 def create_directory_pdf_bytes(entries, title, page_offset_map=None, is_index=False):
     toc_font_regular, toc_font_bold = _get_toc_fonts()
+    desc_font_size = 7
 
     packet = BytesIO()
-    page_size, placements, total_pages = _layout_directory_entries(entries, is_index=is_index)
+    page_size, placements, total_pages = _layout_directory_entries(
+        entries,
+        is_index=is_index,
+        desc_font_name=toc_font_regular,
+        desc_font_size=desc_font_size,
+    )
     c = canvas.Canvas(packet, pagesize=page_size)
     width, _ = page_size
 
@@ -579,10 +651,20 @@ def create_directory_pdf_bytes(entries, title, page_offset_map=None, is_index=Fa
         elif page_offset_map is not None and page_offset_map[entry_index] is not None:
             page_num = str(page_offset_map[entry_index] + 1)
 
-        c.setFont(toc_font_regular, 8)
-        desc_right_limit = placement["item_left_x"] - 8
-        desc = _trim_text_to_width(desc, toc_font_regular, 8, desc_right_limit - placement["desc_x"])
-        c.drawString(placement["desc_x"], placement["y"], desc)
+        c.setFont(toc_font_regular, desc_font_size)
+        if is_index:
+            desc_right_limit = placement["item_left_x"] - 8
+            index_desc = _trim_text_to_width(
+                desc,
+                toc_font_regular,
+                desc_font_size,
+                desc_right_limit - placement["desc_x"],
+            )
+            c.drawString(placement["desc_x"], placement["y"], index_desc)
+        else:
+            desc_line_height = 9
+            for line_index, desc_line in enumerate(placement.get("desc_lines", [desc])):
+                c.drawString(placement["desc_x"], placement["y"] - (line_index * desc_line_height), desc_line)
 
         if display_item:
             item_text = _trim_text_to_width(
