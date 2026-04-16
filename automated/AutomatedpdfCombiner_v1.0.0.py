@@ -11,6 +11,13 @@ import pandas as pd
 import requests
 import urllib3
 from pypdf import PdfReader, PdfWriter
+from pypdf.generic import (
+    ArrayObject,
+    DictionaryObject,
+    FloatObject,
+    NameObject,
+    NumberObject,
+)
 from reportlab.pdfgen import canvas
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
@@ -185,6 +192,10 @@ def validate_output_filename(filename):
 def get_schematic_label(schematic_file_path):
     base_name = os.path.splitext(os.path.basename(schematic_file_path))[0]
     return f"HYDRAULIC SCHEMATIC [{base_name.upper()}]"
+
+
+def is_hydraulic_schematic_entry(description):
+    return str(description).strip().upper().startswith("HYDRAULIC SCHEMATIC")
 
 
 # ---------------------------------------------------------------------------
@@ -405,72 +416,152 @@ def _get_toc_fonts():
     return "Helvetica", "Helvetica-Bold"
 
 
-def create_toc_pdf_bytes(toc_entries, page_offset_map=None):
-    from reportlab.lib.pagesizes import letter
+def _build_index_entries(toc_entries):
+    return sorted(toc_entries, key=lambda entry: entry["desc"].casefold())
+
+
+def _layout_directory_entries(entries):
+    from reportlab.lib.pagesizes import letter, landscape
     from reportlab.lib.units import inch
 
+    page_size = landscape(letter)
+    width, height = page_size
+
+    margin_left = 0.55 * inch
+    margin_right = 0.55 * inch
+    margin_top = 0.75 * inch
+    margin_bottom = 0.6 * inch
+    column_gap = 0.45 * inch
+
+    indent_step = 0.22 * inch
+    row_height = 0.21 * inch
+
+    usable_width = width - margin_left - margin_right
+    column_width = (usable_width - column_gap) / 2
+    column_lefts = [margin_left, margin_left + column_width + column_gap]
+    rows_per_column = max(1, int((height - margin_top - margin_bottom - (0.52 * inch)) / row_height))
+    rows_per_page = rows_per_column * 2
+
+    placements = []
+    for idx, entry in enumerate(entries):
+        per_page_index = idx % rows_per_page
+        page_index = idx // rows_per_page
+        col_index = per_page_index // rows_per_column
+        row_index = per_page_index % rows_per_column
+
+        column_left = column_lefts[col_index]
+        column_right = column_left + column_width
+        title_y = height - margin_top
+        y = title_y - 0.45 * inch - row_index * row_height
+        desc_x = column_left + entry["indent_level"] * indent_step
+        part_x = (desc_x + column_right) / 2
+
+        placements.append(
+            {
+                "entry_index": idx,
+                "page_index": page_index,
+                "desc_x": desc_x,
+                "part_x": part_x,
+                "page_x": column_right - 4,
+                "y": y,
+                "title_y": title_y,
+            }
+        )
+
+    total_pages = (len(entries) + rows_per_page - 1) // rows_per_page if entries else 1
+    return page_size, placements, total_pages
+
+
+def create_directory_pdf_bytes(entries, title, page_offset_map=None):
     toc_font_regular, toc_font_bold = _get_toc_fonts()
 
     packet = BytesIO()
-    c = canvas.Canvas(packet, pagesize=letter)
-    width, height = letter
+    page_size, placements, total_pages = _layout_directory_entries(entries)
+    c = canvas.Canvas(packet, pagesize=page_size)
+    width, _ = page_size
 
-    margin_left = 0.7 * inch
-    margin_right = 0.7 * inch
-    margin_top = 0.75 * inch
-    margin_bottom = 0.6 * inch
-
-    indent_step = 0.28 * inch
-    row_height = 0.24 * inch
-
-    title_y = height - margin_top
-    page_x = width - margin_right
-    y = title_y - 0.45 * inch
-
-    def draw_header():
-        nonlocal y
+    def draw_header(title_y):
         c.setFont(toc_font_bold, 16)
-        c.drawString(margin_left, title_y, "Table of Contents")
+        c.drawString(40, title_y, title)
 
         c.setLineWidth(0.5)
-        c.line(margin_left, title_y - 6, width - margin_right, title_y - 6)
-
-        y = title_y - 0.45 * inch
+        c.line(40, title_y - 6, width - 40, title_y - 6)
         c.setFont(toc_font_regular, 10)
 
-    draw_header()
+    current_page = -1
+    for placement in placements:
+        entry = entries[placement["entry_index"]]
 
-    for i, entry in enumerate(toc_entries):
-        if y < margin_bottom:
-            c.showPage()
-            draw_header()
+        if placement["page_index"] != current_page:
+            if current_page != -1:
+                c.showPage()
+            current_page = placement["page_index"]
+            draw_header(placement["title_y"])
 
-        indent = margin_left + entry["indent_level"] * indent_step
         desc = entry["desc"]
         part = entry["part"]
+        display_part = part if part and not is_hydraulic_schematic_entry(desc) else ""
 
-        text = f"{desc} [{part}]" if part else desc
+        entry_index = placement["entry_index"]
         page_num = ""
-        if page_offset_map is not None and page_offset_map[i] is not None:
-            page_num = str(page_offset_map[i] + 1)
+        if page_offset_map is not None and page_offset_map[entry_index] is not None:
+            page_num = str(page_offset_map[entry_index] + 1)
 
         c.setFont(toc_font_regular, 10)
-        c.drawString(indent, y, text)
+        c.drawString(placement["desc_x"], placement["y"], desc)
 
-        text_width = c.stringWidth(text, toc_font_regular, 10)
-        leader_start = indent + text_width + 6
+        if display_part:
+            c.drawCentredString(placement["part_x"], placement["y"], f"[{display_part}]")
 
         if page_num:
-            c.setDash(1, 2)
-            c.line(leader_start, y + 2, page_x - 18, y + 2)
-            c.setDash()
-            c.drawRightString(page_x, y, page_num)
+            c.drawRightString(placement["page_x"], placement["y"], page_num)
 
-        y -= row_height
+    if current_page == -1:
+        draw_header(page_size[1] - (0.75 * 72))
 
     c.save()
     packet.seek(0)
-    return packet
+    return packet, placements, total_pages
+
+
+def _add_internal_link_annotation(writer, from_page_index, target_page_index, rect):
+    target_ref = writer.pages[target_page_index].indirect_reference
+    annotation = DictionaryObject()
+    annotation.update(
+        {
+            NameObject("/Type"): NameObject("/Annot"),
+            NameObject("/Subtype"): NameObject("/Link"),
+            NameObject("/Rect"): ArrayObject([FloatObject(x) for x in rect]),
+            NameObject("/Border"): ArrayObject([NumberObject(0), NumberObject(0), NumberObject(0)]),
+            NameObject("/A"): DictionaryObject(
+                {
+                    NameObject("/S"): NameObject("/GoTo"),
+                    NameObject("/D"): ArrayObject([target_ref, NameObject("/Fit")]),
+                }
+            ),
+        }
+    )
+    writer.add_annotation(from_page_index, annotation)
+
+
+def add_toc_hyperlinks(writer, toc_placements, effective_page_map, line_height=12):
+    for placement in toc_placements:
+        entry_index = placement["entry_index"]
+        target_page = effective_page_map[entry_index]
+        if target_page is None:
+            continue
+
+        _add_internal_link_annotation(
+            writer,
+            from_page_index=placement["page_index"],
+            target_page_index=target_page,
+            rect=[
+                placement["desc_x"] - 2,
+                placement["y"] - 1,
+                placement["page_x"] + 1,
+                placement["y"] + line_height,
+            ],
+        )
 
 
 def add_page_number_overlay(page, page_num_text, total_pages_text):
@@ -1310,11 +1401,11 @@ def main():
 
     direct_page_map = [None] * len(toc_entries)
 
-    toc_packet = create_toc_pdf_bytes(toc_entries, None)
-    toc_reader = PdfReader(toc_packet)
-    toc_pages = len(toc_reader.pages)
+    toc_packet, _, toc_pages = create_directory_pdf_bytes(toc_entries, "Table of Contents", None)
+    index_entries = _build_index_entries(toc_entries)
+    index_packet, _, index_pages = create_directory_pdf_bytes(index_entries, "Index", None)
 
-    current_page = toc_pages
+    current_page = toc_pages + index_pages
 
     for i, entry in enumerate(toc_entries):
         filename = entry.get("filename")
@@ -1329,12 +1420,22 @@ def main():
 
     effective_page_map = build_effective_page_map(toc_entries, direct_page_map)
 
-    toc_packet = create_toc_pdf_bytes(toc_entries, effective_page_map)
+    toc_packet, toc_placements, _ = create_directory_pdf_bytes(
+        toc_entries,
+        "Table of Contents",
+        effective_page_map,
+    )
+    toc_entry_index_by_id = {id(entry): i for i, entry in enumerate(toc_entries)}
+    index_page_map = [effective_page_map[toc_entry_index_by_id[id(entry)]] for entry in index_entries]
+    index_packet, _, _ = create_directory_pdf_bytes(index_entries, "Index", index_page_map)
     toc_reader = PdfReader(toc_packet)
+    index_reader = PdfReader(index_packet)
 
     writer = PdfWriter()
 
     for page in toc_reader.pages:
+        writer.add_page(page)
+    for page in index_reader.pages:
         writer.add_page(page)
 
     for entry in toc_entries:
@@ -1369,6 +1470,8 @@ def main():
             parent=parent,
         )
         bookmark_refs[i] = bookmark
+
+    add_toc_hyperlinks(writer, toc_placements, effective_page_map)
 
     total_pages = len(writer.pages)
     for i, page in enumerate(writer.pages):
