@@ -113,7 +113,13 @@ def _build_index_entries(entries: list[dict]) -> list[dict]:
                 "indent_level": 0,
                 "toc_indices": [],
             }
+
+        part = str(entry.get("part") or "").strip()
+        if part and not grouped[key]["part"]:
+            grouped[key]["part"] = part
+
         grouped[key]["toc_indices"].append(i)
+
     return sorted(grouped.values(), key=lambda e: e["desc"].casefold())
 
 
@@ -221,7 +227,7 @@ def create_directory_pdf_bytes(entries: list[dict], title: str, page_offset_map=
             page_num = str(page_offset_map[entry_index] + 1)
 
         c.setFont("Helvetica", 8)
-        desc_right_limit = placement["page_left_x"] - 8 if is_index or not display_part else placement["part_x"] - 8
+        desc_right_limit = placement["page_left_x"] - 8 if not display_part else placement["part_x"] - 8
         desc = _trim_text_to_width(desc, "Helvetica", 8, desc_right_limit - placement["desc_x"])
         c.drawString(placement["desc_x"], placement["y"], desc)
         if display_part:
