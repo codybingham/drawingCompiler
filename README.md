@@ -18,6 +18,15 @@ Use this when you already have local drawing PDFs and a structured Excel file th
 
 Use this when you want to assemble one packet from CAD exports and automatically download drawing PDFs from internal services.
 
+### 3. Structure Helpers
+- Location: `helpers/`
+- Scripts:
+  - `helpers/structure_reorder_gui_v1.0.0.py`
+  - `helpers/structure_reference_downloader_v1.0.0.py`
+- Documentation: `helpers/README.md`
+
+Use these when you want to edit existing structure files and/or bulk-download all referenced files.
+
 ## Repository Structure
 
 ```text
@@ -27,6 +36,10 @@ drawingCompiler/
 │   ├── AutomatedpdfCombiner_v1.0.0.py
 │   ├── README.md
 │   └── README.txt
+├── helpers/
+│   ├── structure_reorder_gui_v1.0.0.py
+│   ├── structure_reference_downloader_v1.0.0.py
+│   └── README.md
 └── manual/
     ├── pdfCombiner_v1.0.0.py
     ├── README.md
