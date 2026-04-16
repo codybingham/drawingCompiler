@@ -417,10 +417,22 @@ def _get_toc_fonts():
 
 
 def _build_index_entries(toc_entries):
-    return sorted(toc_entries, key=lambda entry: entry["desc"].casefold())
+    grouped = {}
+    for entry in toc_entries:
+        key = entry["desc"].strip().casefold()
+        if key not in grouped:
+            grouped[key] = {
+                "desc": entry["desc"].strip(),
+                "part": "",
+                "indent_level": 0,
+                "toc_indices": [],
+            }
+        grouped[key]["toc_indices"].append(entry["toc_index"])
+
+    return sorted(grouped.values(), key=lambda entry: entry["desc"].casefold())
 
 
-def _layout_directory_entries(entries):
+def _layout_directory_entries(entries, is_index=False):
     from reportlab.lib.pagesizes import letter, landscape
     from reportlab.lib.units import inch
 
@@ -453,8 +465,10 @@ def _layout_directory_entries(entries):
         column_right = column_left + column_width
         title_y = height - margin_top
         y = title_y - 0.45 * inch - row_index * row_height
-        desc_x = column_left + entry["indent_level"] * indent_step
-        part_x = (desc_x + column_right) / 2
+        desc_x = column_left + (0 if is_index else entry["indent_level"] * indent_step)
+        page_x = column_right - 4
+        page_left_x = column_right - (0.8 * inch)
+        part_x = page_left_x - 6
 
         placements.append(
             {
@@ -462,7 +476,8 @@ def _layout_directory_entries(entries):
                 "page_index": page_index,
                 "desc_x": desc_x,
                 "part_x": part_x,
-                "page_x": column_right - 4,
+                "page_x": page_x,
+                "page_left_x": page_left_x,
                 "y": y,
                 "title_y": title_y,
             }
@@ -472,11 +487,29 @@ def _layout_directory_entries(entries):
     return page_size, placements, total_pages
 
 
-def create_directory_pdf_bytes(entries, title, page_offset_map=None):
+def _trim_text_to_width(text, font_name, font_size, max_width):
+    if max_width <= 0:
+        return ""
+    if pdfmetrics.stringWidth(text, font_name, font_size) <= max_width:
+        return text
+
+    ellipsis = "..."
+    ellipsis_width = pdfmetrics.stringWidth(ellipsis, font_name, font_size)
+    available = max_width - ellipsis_width
+    if available <= 0:
+        return ellipsis
+
+    trimmed = text
+    while trimmed and pdfmetrics.stringWidth(trimmed, font_name, font_size) > available:
+        trimmed = trimmed[:-1]
+    return f"{trimmed}{ellipsis}"
+
+
+def create_directory_pdf_bytes(entries, title, page_offset_map=None, is_index=False):
     toc_font_regular, toc_font_bold = _get_toc_fonts()
 
     packet = BytesIO()
-    page_size, placements, total_pages = _layout_directory_entries(entries)
+    page_size, placements, total_pages = _layout_directory_entries(entries, is_index=is_index)
     c = canvas.Canvas(packet, pagesize=page_size)
     width, _ = page_size
 
@@ -504,14 +537,20 @@ def create_directory_pdf_bytes(entries, title, page_offset_map=None):
 
         entry_index = placement["entry_index"]
         page_num = ""
-        if page_offset_map is not None and page_offset_map[entry_index] is not None:
+        if "page_text" in entry and entry["page_text"]:
+            page_num = entry["page_text"]
+        elif page_offset_map is not None and page_offset_map[entry_index] is not None:
             page_num = str(page_offset_map[entry_index] + 1)
 
-        c.setFont(toc_font_regular, 10)
+        c.setFont(toc_font_regular, 8)
+        desc_right_limit = placement["page_left_x"] - 8 if is_index or not display_part else placement["part_x"] - 8
+        desc = _trim_text_to_width(desc, toc_font_regular, 8, desc_right_limit - placement["desc_x"])
         c.drawString(placement["desc_x"], placement["y"], desc)
 
         if display_part:
-            c.drawCentredString(placement["part_x"], placement["y"], f"[{display_part}]")
+            part_text = f"[{display_part}]"
+            part_text = _trim_text_to_width(part_text, toc_font_regular, 8, placement["page_left_x"] - placement["part_x"] - 4)
+            c.drawRightString(placement["part_x"], placement["y"], part_text)
 
         if page_num:
             c.drawRightString(placement["page_x"], placement["y"], page_num)
@@ -1398,12 +1437,14 @@ def main():
         )
 
     toc_entries = build_hierarchy(raw_entries)
+    for i, entry in enumerate(toc_entries):
+        entry["toc_index"] = i
 
     direct_page_map = [None] * len(toc_entries)
 
     toc_packet, _, toc_pages = create_directory_pdf_bytes(toc_entries, "Table of Contents", None)
     index_entries = _build_index_entries(toc_entries)
-    index_packet, _, index_pages = create_directory_pdf_bytes(index_entries, "Index", None)
+    index_packet, _, index_pages = create_directory_pdf_bytes(index_entries, "Index", None, is_index=True)
 
     current_page = toc_pages + index_pages
 
@@ -1425,9 +1466,14 @@ def main():
         "Table of Contents",
         effective_page_map,
     )
-    toc_entry_index_by_id = {id(entry): i for i, entry in enumerate(toc_entries)}
-    index_page_map = [effective_page_map[toc_entry_index_by_id[id(entry)]] for entry in index_entries]
-    index_packet, _, _ = create_directory_pdf_bytes(index_entries, "Index", index_page_map)
+    for entry in index_entries:
+        pages = []
+        for toc_index in entry["toc_indices"]:
+            page = effective_page_map[toc_index]
+            if page is not None and page not in pages:
+                pages.append(page)
+        entry["page_text"] = ", ".join(str(page + 1) for page in pages)
+    index_packet, _, _ = create_directory_pdf_bytes(index_entries, "Index", None, is_index=True)
     toc_reader = PdfReader(toc_packet)
     index_reader = PdfReader(index_packet)
 
