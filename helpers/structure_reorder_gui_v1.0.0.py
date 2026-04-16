@@ -479,7 +479,9 @@ class ReorderWindow:
                 recurse(child)
 
         for item_id in self.tree.get_children(""):
-            recurse(item_id)
+            self.tree.item(item_id, open=True)
+            for child in self.tree.get_children(item_id):
+                recurse(child)
 
 
 def main() -> None:
