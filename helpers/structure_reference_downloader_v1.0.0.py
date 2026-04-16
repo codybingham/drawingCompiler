@@ -2,6 +2,7 @@ import os
 import re
 import tkinter as tk
 from tkinter import filedialog, messagebox
+from tkinter import ttk
 
 import pandas as pd
 import requests
@@ -97,7 +98,7 @@ def download_url(session: requests.Session, url: str, out_path: str) -> None:
         f.write(response.content)
 
 
-def run_download(structure_path: str, output_folder: str) -> dict:
+def run_download(structure_path: str, output_folder: str, progress_callback=None) -> dict:
     os.makedirs(output_folder, exist_ok=True)
 
     part_numbers, direct_urls = read_structure_references(structure_path)
@@ -108,6 +109,11 @@ def run_download(structure_path: str, output_folder: str) -> dict:
 
     downloaded = []
     failed = []
+    total_downloads = len(found_paths) + len(direct_urls)
+    completed_downloads = 0
+
+    if progress_callback:
+        progress_callback(completed_downloads, total_downloads, "Preparing downloads...")
 
     for part, url in found_paths.items():
         out_path = os.path.join(output_folder, f"{part}.pdf")
@@ -116,6 +122,9 @@ def run_download(structure_path: str, output_folder: str) -> dict:
             downloaded.append(part)
         except Exception:
             failed.append(part)
+        completed_downloads += 1
+        if progress_callback:
+            progress_callback(completed_downloads, total_downloads, f"Downloaded part: {part}")
 
     for url in direct_urls:
         filename = os.path.basename(url.split("?", 1)[0]) or "downloaded_file"
@@ -125,6 +134,9 @@ def run_download(structure_path: str, output_folder: str) -> dict:
             downloaded.append(url)
         except Exception:
             failed.append(url)
+        completed_downloads += 1
+        if progress_callback:
+            progress_callback(completed_downloads, total_downloads, f"Downloaded URL file: {filename}")
 
     return {
         "part_numbers_total": len(part_numbers),
@@ -155,11 +167,44 @@ def main() -> None:
     if not output_folder:
         return
 
+    progress_window = tk.Toplevel(root)
+    progress_window.title("Downloading References")
+    progress_window.resizable(False, False)
+    progress_window.transient(root)
+    progress_window.grab_set()
+
+    status_var = tk.StringVar(value="Starting download...")
+    status_label = ttk.Label(progress_window, textvariable=status_var, width=60)
+    status_label.pack(padx=16, pady=(16, 8))
+
+    progress_var = tk.DoubleVar(value=0)
+    progress_bar = ttk.Progressbar(
+        progress_window,
+        orient="horizontal",
+        mode="determinate",
+        length=420,
+        variable=progress_var,
+        maximum=100,
+    )
+    progress_bar.pack(padx=16, pady=(0, 16))
+
+    def update_progress(completed: int, total: int, status_text: str) -> None:
+        status_var.set(status_text)
+        if total > 0:
+            progress_var.set((completed / total) * 100)
+        else:
+            progress_var.set(100)
+        root.update_idletasks()
+
     try:
-        result = run_download(structure_path, output_folder)
+        result = run_download(structure_path, output_folder, progress_callback=update_progress)
     except Exception as exc:
+        progress_window.destroy()
         messagebox.showerror("Download Error", str(exc))
         return
+    finally:
+        if progress_window.winfo_exists():
+            progress_window.destroy()
 
     summary = [
         f"Output folder: {result['output_folder']}",
