@@ -473,15 +473,17 @@ def _layout_directory_entries(entries, is_index=False):
         y = title_y - 0.45 * inch - row_index * row_height
         desc_x = column_left + (0 if is_index else entry["indent_level"] * indent_step)
         page_x = column_right - 4
-        page_left_x = column_right - (0.8 * inch)
-        part_x = page_left_x - 6
+        page_left_x = column_right - (0.62 * inch)
+        item_x = page_left_x - 8
+        item_left_x = item_x - (1.05 * inch)
 
         placements.append(
             {
                 "entry_index": idx,
                 "page_index": page_index,
                 "desc_x": desc_x,
-                "part_x": part_x,
+                "item_x": item_x,
+                "item_left_x": item_left_x,
                 "page_x": page_x,
                 "page_left_x": page_left_x,
                 "y": y,
@@ -538,20 +540,15 @@ def create_directory_pdf_bytes(entries, title, page_offset_map=None, is_index=Fa
             draw_header(placement["title_y"])
 
         desc = entry["desc"]
-        part = entry["part"]
-        display_part = part if part and not is_hydraulic_schematic_entry(desc) else ""
         item_number = (entry.get("item_number") or "").strip()
         item_numbers = entry.get("item_numbers") or []
 
         if is_hydraulic_schematic_entry(desc):
-            item_prefix = ""
+            display_item = ""
         elif is_index:
-            item_prefix = ", ".join(item_numbers)
+            display_item = ", ".join(item_numbers)
         else:
-            item_prefix = item_number
-
-        if item_prefix:
-            desc = f"{desc} - {item_prefix}"
+            display_item = item_number
 
         entry_index = placement["entry_index"]
         page_num = ""
@@ -561,14 +558,18 @@ def create_directory_pdf_bytes(entries, title, page_offset_map=None, is_index=Fa
             page_num = str(page_offset_map[entry_index] + 1)
 
         c.setFont(toc_font_regular, 8)
-        desc_right_limit = placement["page_left_x"] - 8 if is_index or not display_part else placement["part_x"] - 8
+        desc_right_limit = placement["item_left_x"] - 8
         desc = _trim_text_to_width(desc, toc_font_regular, 8, desc_right_limit - placement["desc_x"])
         c.drawString(placement["desc_x"], placement["y"], desc)
 
-        if display_part:
-            part_text = f"[{display_part}]"
-            part_text = _trim_text_to_width(part_text, toc_font_regular, 8, placement["page_left_x"] - placement["part_x"] - 4)
-            c.drawRightString(placement["part_x"], placement["y"], part_text)
+        if display_item:
+            item_text = _trim_text_to_width(
+                display_item,
+                toc_font_regular,
+                8,
+                placement["item_x"] - placement["item_left_x"],
+            )
+            c.drawRightString(placement["item_x"], placement["y"], item_text)
 
         if page_num:
             c.drawRightString(placement["page_x"], placement["y"], page_num)
@@ -1486,7 +1487,7 @@ def main():
             {
                 "code_text": code_text,
                 "code_tuple": code_tuple,
-                "item_number": "" if code_text == "1" else code_text,
+                "item_number": "" if code_text == "1" else part,
                 "desc": desc,
                 "part": part,
                 "filename": filename,
