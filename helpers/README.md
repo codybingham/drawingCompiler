@@ -44,8 +44,9 @@ python helpers/structure_reference_downloader_v1.0.0.py
   - `Part Number`
 
 ### Notes
-- Automatically detects common CAD headers (for example `Item Number`, `Description`, `Part Number`).
-- If no level-like column is found, `Level` values are generated sequentially (`1`, `2`, `3`, ...).
+- Uses the same row-preservation and hierarchy rules as the automated compiler's CAD parsing flow.
+- Requires CAD columns equivalent to: `Object`, `Name`, and `Item Number`.
+- Keeps matching part rows (`13*`, `FB*`, `HA*` with exclusions), preserves required parents, and writes levels like `1`, `1.1`, `1.1.1`.
 - Supports both CLI and file-picker workflow.
 
 ### Run
