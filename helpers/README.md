@@ -7,6 +7,8 @@ This folder contains standalone helper tools that work with existing **structure
 - Purpose: Open a structure Excel file (`Level`, `Description`, `Part Number`) and reorder the hierarchy before saving a new structure file.
 
 ### Features
+- Add top-level items, child items, and sibling items.
+- Edit item description and part number.
 - Move selected level up/down among siblings.
 - Remove a level and its children.
 - Undo remove (Ctrl+Z).
