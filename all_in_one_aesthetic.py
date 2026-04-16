@@ -1636,6 +1636,7 @@ class DrawingCompilerStudio(tk.Tk):
             if not self._reorder_tree_available():
                 self.show_workflow("reorder_structure", add_history=False)
             self._reorder_refresh()
+            self._reorder_apply_default_tree_layout()
         except Exception as exc:
             messagebox.showerror("Open failed", str(exc), parent=self)
 
@@ -1684,6 +1685,14 @@ class DrawingCompilerStudio(tk.Tk):
                     self.reorder_tree.focus(item_id)
                     self.reorder_tree.see(item_id)
                     break
+
+    def _reorder_apply_default_tree_layout(self):
+        if not self._reorder_tree_available():
+            return
+        for top_item in self.reorder_tree.get_children():
+            self.reorder_tree.item(top_item, open=True)
+            for child in self.reorder_tree.get_children(top_item):
+                self.reorder_tree.item(child, open=False)
 
     def _reorder_selected_node(self):
         if not self._reorder_tree_available():
