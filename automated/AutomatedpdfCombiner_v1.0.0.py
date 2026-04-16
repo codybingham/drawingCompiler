@@ -444,7 +444,7 @@ def _build_index_entries(toc_entries):
     return sorted(grouped.values(), key=lambda entry: entry["desc"].casefold())
 
 
-def _layout_directory_entries(entries, is_index=False, desc_font_name="Helvetica", desc_font_size=7):
+def _layout_directory_entries(entries, is_index=False, desc_font_name="Helvetica", desc_font_size=8):
     from reportlab.lib.pagesizes import letter, landscape
     from reportlab.lib.units import inch
 
@@ -489,19 +489,26 @@ def _layout_directory_entries(entries, is_index=False, desc_font_name="Helvetica
 
             desc_right_limit = item_left_x - 8
             desc_max_width = max(0, desc_right_limit - desc_x)
-            if is_index:
-                desc_lines = [str(entry["desc"] or "")]
-            else:
-                desc_lines = _wrap_text_to_width(
-                    entry["desc"],
-                    desc_font_name,
-                    desc_font_size,
-                    desc_max_width,
-                )
-            row_span = max(
-                len(desc_lines),
-                2 if (is_index and _should_wrap_index_pages(entry)) else 1,
+            desc_lines = _wrap_text_to_width(
+                entry["desc"],
+                desc_font_name,
+                desc_font_size,
+                desc_max_width,
             )
+
+            part_lines = []
+            if is_index:
+                part_text = str(entry.get("part") or "").strip()
+                if part_text:
+                    part_lines = _wrap_text_to_width(
+                        part_text,
+                        desc_font_name,
+                        desc_font_size,
+                        item_column_width,
+                    )
+
+            page_wrap = is_index and _should_wrap_index_pages(entry)
+            row_span = max(len(desc_lines), len(part_lines), 2 if page_wrap else 1)
 
             if (row_cursor % rows_per_column) + row_span > rows_per_column:
                 row_cursor += rows_per_column - (row_cursor % rows_per_column)
@@ -519,10 +526,12 @@ def _layout_directory_entries(entries, is_index=False, desc_font_name="Helvetica
                 "page_x": page_x,
                 "page_left_x": page_left_x,
                 "y": y,
-                "page_y": y - row_height if row_span > 1 else y,
+                "page_y": y - row_height if page_wrap else y,
                 "title_y": title_y,
                 "row_span": row_span,
                 "desc_lines": desc_lines,
+                "part_lines": part_lines,
+                "page_wrap": page_wrap,
             }
         )
         row_cursor += row_span
@@ -604,7 +613,7 @@ def _should_wrap_index_pages(entry):
 
 def create_directory_pdf_bytes(entries, title, page_offset_map=None, is_index=False):
     toc_font_regular, toc_font_bold = _get_toc_fonts()
-    desc_font_size = 7
+    desc_font_size = 8
 
     packet = BytesIO()
     page_size, placements, total_pages = _layout_directory_entries(
@@ -653,30 +662,30 @@ def create_directory_pdf_bytes(entries, title, page_offset_map=None, is_index=Fa
 
         c.setFont(toc_font_regular, desc_font_size)
         if is_index:
-            desc_right_limit = placement["item_left_x"] - 8
-            index_desc = _trim_text_to_width(
-                desc,
-                toc_font_regular,
-                desc_font_size,
-                desc_right_limit - placement["desc_x"],
-            )
-            c.drawString(placement["desc_x"], placement["y"], index_desc)
+            desc_line_height = 9
+            for line_index, desc_line in enumerate(placement.get("desc_lines", [desc])):
+                c.drawString(placement["desc_x"], placement["y"] - (line_index * desc_line_height), desc_line)
         else:
             desc_line_height = 9
             for line_index, desc_line in enumerate(placement.get("desc_lines", [desc])):
                 c.drawString(placement["desc_x"], placement["y"] - (line_index * desc_line_height), desc_line)
 
         if display_item:
-            item_text = _trim_text_to_width(
-                display_item,
-                toc_font_regular,
-                8,
-                placement["item_x"] - placement["item_left_x"],
-            )
-            c.drawRightString(placement["item_x"], placement["y"], item_text)
+            if is_index:
+                item_line_height = 9
+                for line_index, item_line in enumerate(placement.get("part_lines", [display_item])):
+                    c.drawRightString(placement["item_x"], placement["y"] - (line_index * item_line_height), item_line)
+            else:
+                item_text = _trim_text_to_width(
+                    display_item,
+                    toc_font_regular,
+                    8,
+                    placement["item_x"] - placement["item_left_x"],
+                )
+                c.drawRightString(placement["item_x"], placement["y"], item_text)
 
         if page_num:
-            if is_index and placement.get("row_span", 1) > 1:
+            if is_index and placement.get("page_wrap"):
                 c.drawRightString(placement["page_x"], placement["page_y"], page_num)
             else:
                 page_text = _trim_text_to_width(
