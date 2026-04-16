@@ -978,6 +978,26 @@ class DrawingCompilerStudio(tk.Tk):
         )
         style.map("Reorder.Treeview.Heading", background=[("active", C["border"])])
 
+        # Scrollbar
+        style.configure(
+            "Dark.Vertical.TScrollbar",
+            troughcolor=C["card"],
+            background=C["border"],
+            borderwidth=0,
+            relief="flat",
+            arrowsize=0,
+        )
+        style.map("Dark.Vertical.TScrollbar", background=[("active", C["border_hi"])])
+
+        # Progressbar (for any ttk use)
+        style.configure(
+            "Accent.Horizontal.TProgressbar",
+            troughcolor=C["border"],
+            background=C["accent"],
+            borderwidth=0,
+            thickness=4,
+        )
+
     def _show_themed_dialog(self, title: str, message: str, tone: str = "info"):
         tone_map = {
             "info": (C["accent"], C["accent_muted"], "OK"),
@@ -1041,26 +1061,6 @@ class DrawingCompilerStudio(tk.Tk):
         dialog.geometry(f"{w}x{h}+{px}+{py}")
         dialog.bind("<Escape>", lambda _e: dialog.destroy())
         dialog.wait_window(dialog)
-
-        # Scrollbar
-        style.configure(
-            "Dark.Vertical.TScrollbar",
-            troughcolor=C["card"],
-            background=C["border"],
-            borderwidth=0,
-            relief="flat",
-            arrowsize=0,
-        )
-        style.map("Dark.Vertical.TScrollbar", background=[("active", C["border_hi"])])
-
-        # Progressbar (for any ttk use)
-        style.configure(
-            "Accent.Horizontal.TProgressbar",
-            troughcolor=C["border"],
-            background=C["accent"],
-            borderwidth=0,
-            thickness=4,
-        )
 
     # ── Shell layout ──────────────────────────────────────────────────────────
 
