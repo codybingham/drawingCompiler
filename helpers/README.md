@@ -35,6 +35,29 @@ python helpers/structure_reorder_gui_v1.0.0.py
 python helpers/structure_reference_downloader_v1.0.0.py
 ```
 
+
+## 3) CAD Export to Structure Converter
+- Script: `helpers/cad_export_to_structure_v1.0.0.py`
+- Purpose: Convert a CAD export (`.xlsx`/`.csv`) into a structure Excel file with columns:
+  - `Level`
+  - `Description`
+  - `Part Number`
+
+### Notes
+- Automatically detects common CAD headers (for example `Item Number`, `Description`, `Part Number`).
+- If no level-like column is found, `Level` values are generated sequentially (`1`, `2`, `3`, ...).
+- Supports both CLI and file-picker workflow.
+
+### Run
+```bash
+python helpers/cad_export_to_structure_v1.0.0.py
+```
+
+### CLI Example
+```bash
+python helpers/cad_export_to_structure_v1.0.0.py --input /path/to/cad_export.xlsx --output /path/to/output_structure.xlsx
+```
+
 ## Requirements
 These helpers rely on the same Python dependencies used in this repo:
 - `pandas`
