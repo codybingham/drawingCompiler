@@ -915,7 +915,8 @@ class ProgressDialog:
         self.status_var.set(message)
         self.pct_var.set(f"{int(pct * 100)}%")
         self.bar_fill.place(relwidth=pct)
-        self.parent.update_idletasks()
+        self.window.update_idletasks()
+        self.window.update()
 
     def close(self):
         if self.window.winfo_exists():
@@ -976,6 +977,70 @@ class DrawingCompilerStudio(tk.Tk):
             foreground=[("selected", C["sel_text"])],
         )
         style.map("Reorder.Treeview.Heading", background=[("active", C["border"])])
+
+    def _show_themed_dialog(self, title: str, message: str, tone: str = "info"):
+        tone_map = {
+            "info": (C["accent"], C["accent_muted"], "OK"),
+            "warning": (C["amber"], C["amber_muted"], "Got it"),
+            "error": (C["danger"], C["danger_muted"], "Close"),
+        }
+        accent, muted, button_text = tone_map.get(tone, tone_map["info"])
+        dialog = tk.Toplevel(self)
+        dialog.title(title)
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.resizable(False, False)
+        dialog.configure(bg=C["bg"])
+
+        outer = tk.Frame(dialog, bg=C["card"], bd=0, highlightthickness=1, highlightbackground=C["border"])
+        outer.pack(fill="both", expand=True, padx=1, pady=1)
+        frame = tk.Frame(outer, bg=C["card"], padx=20, pady=16)
+        frame.pack(fill="both", expand=True)
+
+        tk.Label(
+            frame,
+            text=title.upper(),
+            bg=C["card"],
+            fg=accent,
+            font=("Consolas", 10, "bold"),
+            anchor="w",
+        ).pack(fill="x", pady=(0, 8))
+
+        tk.Label(
+            frame,
+            text=message,
+            justify="left",
+            anchor="w",
+            bg=C["card"],
+            fg=C["text_dim"],
+            font=("Segoe UI", 10),
+            wraplength=560,
+        ).pack(fill="x", pady=(0, 14))
+
+        btn = tk.Button(
+            frame,
+            text=button_text,
+            bg=muted,
+            fg=accent,
+            activebackground=accent,
+            activeforeground="#FFFFFF",
+            font=("Segoe UI", 10, "bold"),
+            bd=0,
+            padx=18,
+            pady=8,
+            cursor="hand2",
+            command=dialog.destroy,
+        )
+        btn.pack(anchor="e")
+
+        dialog.update_idletasks()
+        w = min(640, max(460, dialog.winfo_reqwidth() + 20))
+        h = min(440, max(170, dialog.winfo_reqheight() + 12))
+        px = self.winfo_x() + (self.winfo_width() - w) // 2
+        py = self.winfo_y() + (self.winfo_height() - h) // 2
+        dialog.geometry(f"{w}x{h}+{px}+{py}")
+        dialog.bind("<Escape>", lambda _e: dialog.destroy())
+        dialog.wait_window(dialog)
 
         # Scrollbar
         style.configure(
@@ -1405,21 +1470,29 @@ class DrawingCompilerStudio(tk.Tk):
                 messagebox.showerror("Invalid filename", str(exc), parent=self)
                 return
             progress = ProgressDialog(self, "Building Manual Packet")
+            result = None
+            error = None
             try:
                 result = build_manual_packet(
                     structure_var.get(), drawings_var.get(), output_var.get(),
                     schematic_pdf=schematic_var.get().strip() or None,
                     progress_callback=progress.update,
                 )
-                messagebox.showinfo("Packet complete",
-                    f"Output:  {result['output_pdf']}\n"
-                    f"Parts included:  {result['included_parts']}\n"
-                    f"Parts missing:   {len(result['missing_parts'])}\n\n"
-                    f"Missing:\n{summarize_list(result['missing_parts'])}", parent=self)
             except Exception as exc:
-                messagebox.showerror("Build failed", str(exc), parent=self)
+                error = str(exc)
             finally:
                 progress.close()
+            if error:
+                self._show_themed_dialog("Build failed", error, tone="error")
+                return
+            self._show_themed_dialog(
+                "Packet complete",
+                f"Output:  {result['output_pdf']}\n"
+                f"Parts included:  {result['included_parts']}\n"
+                f"Parts missing:   {len(result['missing_parts'])}\n\n"
+                f"Missing:\n{summarize_list(result['missing_parts'])}",
+                tone="info",
+            )
 
         self._divider(card)
         self._run_btn(card, "Build Manual Packet", run, color).pack(anchor="w")
@@ -1467,25 +1540,33 @@ class DrawingCompilerStudio(tk.Tk):
                 messagebox.showerror("Invalid filename", str(exc), parent=self)
                 return
             progress = ProgressDialog(self, "Running Automated Build")
+            result = None
+            error = None
             try:
                 result = build_automated_packet(
                     cad_var.get(), schematic_var.get(),
                     download_var.get(), output_var.get(),
                     progress_callback=progress.update,
                 )
-                messagebox.showinfo("Build complete",
-                    f"Output:             {result['output_pdf']}\n"
-                    f"Structure file:     {result['structure_path']}\n"
-                    f"Parts included:     {result['included_parts']}\n"
-                    f"Missing in packet:  {len(result['missing_parts'])}\n"
-                    f"Download failures:  {len(result['failed_downloads'])}\n"
-                    f"Not found in lookup:{len(result['not_found'])}\n\n"
-                    f"Missing in packet:\n{summarize_list(result['missing_parts'])}\n\n"
-                    f"Lookup not found:\n{summarize_list(result['not_found'])}", parent=self)
             except Exception as exc:
-                messagebox.showerror("Build failed", str(exc), parent=self)
+                error = str(exc)
             finally:
                 progress.close()
+            if error:
+                self._show_themed_dialog("Build failed", error, tone="error")
+                return
+            self._show_themed_dialog(
+                "Build complete",
+                f"Output:             {result['output_pdf']}\n"
+                f"Structure file:     {result['structure_path']}\n"
+                f"Parts included:     {result['included_parts']}\n"
+                f"Missing in packet:  {len(result['missing_parts'])}\n"
+                f"Download failures:  {len(result['failed_downloads'])}\n"
+                f"Not found in lookup:{len(result['not_found'])}\n\n"
+                f"Missing in packet:\n{summarize_list(result['missing_parts'])}\n\n"
+                f"Lookup not found:\n{summarize_list(result['not_found'])}",
+                tone="info",
+            )
 
         self._divider(card)
         self._run_btn(card, "Run Automated Build", run, color).pack(anchor="w")
@@ -1880,18 +1961,26 @@ class DrawingCompilerStudio(tk.Tk):
                 messagebox.showwarning("Missing fields", "Choose structure file and output folder.", parent=self)
                 return
             progress = ProgressDialog(self, "Downloading Drawings")
+            result = None
+            error = None
             try:
                 result = download_references(structure_var.get(), output_var.get(), progress_callback=progress.update)
-                messagebox.showinfo("Download complete",
-                    f"Downloaded:  {len(result['downloaded'])}\n"
-                    f"Not found:   {len(result['missing_parts'])}\n"
-                    f"Failed:      {len(result['failed'])}\n\n"
-                    f"Not found:\n{summarize_list(result['missing_parts'])}\n\n"
-                    f"Failed:\n{summarize_list(result['failed'])}", parent=self)
             except Exception as exc:
-                messagebox.showerror("Download failed", str(exc), parent=self)
+                error = str(exc)
             finally:
                 progress.close()
+            if error:
+                self._show_themed_dialog("Download failed", error, tone="error")
+                return
+            self._show_themed_dialog(
+                "Download complete",
+                f"Downloaded:  {len(result['downloaded'])}\n"
+                f"Not found:   {len(result['missing_parts'])}\n"
+                f"Failed:      {len(result['failed'])}\n\n"
+                f"Not found:\n{summarize_list(result['missing_parts'])}\n\n"
+                f"Failed:\n{summarize_list(result['failed'])}",
+                tone="info",
+            )
 
         self._divider(card)
         self._run_btn(card, "Download Drawings", run, color).pack(anchor="w")
