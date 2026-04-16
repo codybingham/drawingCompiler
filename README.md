@@ -1,6 +1,6 @@
 # Drawing Compiler Repository
 
-This repository contains two related Python tools for building compiled drawing PDFs from structured inputs.
+This repository contains tools for working with structured drawing data and PDFs.
 
 ## Projects
 
@@ -11,12 +11,12 @@ This repository contains two related Python tools for building compiled drawing 
 
 Use this when you already have local drawing PDFs and a structured Excel file that defines hierarchy/order.
 
-### 2. Automated Drawing Packet Builder
+### 2. Automated Drawing Downloader
 - Location: `automated/`
 - Script: `automated/AutomatedpdfCombiner_v1.0.0.py`
 - Documentation: `automated/README.md`
 
-Use this when you want to assemble one packet from CAD exports and automatically download drawing PDFs from internal services.
+Use this when you want to pull drawing PDFs from a structure file using internal services, without compiling a final packet.
 
 ### 3. Structure Helpers
 - Location: `helpers/`

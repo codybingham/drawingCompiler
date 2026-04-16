@@ -5,7 +5,7 @@ import re
 import sys
 from io import BytesIO
 import tkinter as tk
-from tkinter import filedialog, simpledialog, messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 import pandas as pd
 import requests
@@ -297,17 +297,24 @@ def load_export_section(file_path):
     return ExportSection(file_path, structure_root)
 
 
-def flatten_sections_to_rows(export_sections, schematic_file_path):
-    rows = [
-        {
-            "Level": "1",
-            "Description": get_schematic_label(schematic_file_path),
-            "Part Number": "",
-            "IsSection": False,
-        }
-    ]
+def load_structure_file(file_path):
+    df = pd.read_excel(file_path)
+    part_col = find_column(df, ["Part Number", "PartNumber", "Part #", "Part"])
 
-    next_top_level = 2
+    structure_rows = []
+    for _, row in df.iterrows():
+        part_number = "" if pd.isna(row[part_col]) else str(row[part_col]).strip()
+        structure_rows.append({"Part Number": part_number})
+
+    if not structure_rows:
+        raise ValueError(f"No rows were found in {os.path.basename(file_path)}.")
+
+    return pd.DataFrame(structure_rows)
+
+
+def flatten_sections_to_rows(export_sections):
+    rows = []
+    next_top_level = 1
 
     def walk(nodes, prefix):
         for idx, node in enumerate(nodes, start=1):
@@ -341,14 +348,12 @@ def flatten_sections_to_rows(export_sections, schematic_file_path):
     return rows
 
 
-def export_structure_excel(structure_df, output_pdf_path):
+def export_structure_excel(structure_df, output_dir, output_stem):
     structure_export = structure_df.copy()
     preferred_columns = ["Level", "Description", "Part Number"]
     available_columns = [col for col in preferred_columns if col in structure_export.columns]
     structure_export = structure_export[available_columns]
 
-    output_dir = os.path.dirname(output_pdf_path)
-    output_stem = os.path.splitext(os.path.basename(output_pdf_path))[0]
     structure_filename = f"{output_stem}_Structure.xlsx"
     structure_path = os.path.join(output_dir, structure_filename)
 
@@ -914,10 +919,9 @@ def build_page_maps(toc_entries, drawings_folder, toc_pages):
 # ---------------------------------------------------------------------------
 
 class MultiExportReorderDialog:
-    def __init__(self, parent, export_sections, schematic_file_path):
+    def __init__(self, parent, export_sections):
         self.parent = parent
         self.export_sections = export_sections[:]
-        self.schematic_file_path = schematic_file_path
         self.result = False
 
         # Undo stack: each entry is a callable that restores the previous state
@@ -1037,8 +1041,8 @@ class MultiExportReorderDialog:
         root_id = self.tree.insert(
             "",
             "end",
-            text=get_schematic_label(self.schematic_file_path),
-            values=("", "Selected schematic"),
+            text="Selected CAD exports",
+            values=("", ""),
             open=True,
         )
         self.item_lookup[root_id] = ("root", None)
@@ -1454,87 +1458,33 @@ def main():
     config = load_config()
     initial_dir = config.get("last_folder") or None
 
-    first_cad_export = filedialog.askopenfilename(
-        title=f"Automated Drawing Packet Builder v{APP_VERSION} - Select Initial CAD Export Excel File",
+    selected_input = filedialog.askopenfilename(
+        title=f"Automated Drawing Downloader v{APP_VERSION} - Select Structure Excel File",
         filetypes=[("Excel files", "*.xlsx *.xlsm *.xls"), ("All files", "*.*")],
         initialdir=initial_dir,
     )
-    if not first_cad_export:
-        raise Exception("No CAD export Excel file selected.")
+    if not selected_input:
+        raise Exception("No structure Excel file selected.")
 
-    config["last_folder"] = os.path.dirname(first_cad_export)
+    config["last_folder"] = os.path.dirname(selected_input)
     save_config(config)
 
-    schematic_file = filedialog.askopenfilename(
-        title="Select Hydraulic Schematic PDF",
-        filetypes=[("PDF files", "*.pdf"), ("All files", "*.*")],
+    drawings_folder = filedialog.askdirectory(
+        title="Select Folder to Save Downloaded Drawing PDFs",
         initialdir=config.get("last_folder"),
+        mustexist=True,
     )
-    if not schematic_file:
-        raise Exception("No schematic PDF selected.")
+    if not drawings_folder:
+        raise Exception("No download folder selected.")
 
-    output_name = simpledialog.askstring(
-        "Output File Name",
-        "Enter compiled PDF file name:",
-        initialvalue="CombinedDrawings.pdf",
-        parent=root,
-    )
-    if output_name is None:
-        raise Exception("Output file name entry cancelled.")
+    config["last_folder"] = drawings_folder
+    save_config(config)
 
-    output_name = output_name.strip()
-    if not output_name:
-        output_name = "CombinedDrawings.pdf"
-    if not output_name.lower().endswith(".pdf"):
-        output_name += ".pdf"
-
-    output_name = validate_output_filename(output_name)
-
-    base_folder = os.path.dirname(first_cad_export)
-    output_pdf = os.path.join(base_folder, output_name)
-
-    drawings_folder = os.path.join(base_folder, "_downloaded_drawings")
     os.makedirs(drawings_folder, exist_ok=True)
 
-    # --- Loading spinner ---
-    loading = tk.Toplevel(root)
-    loading.title("Loading")
-    loading.geometry("400x90")
-    loading.resizable(False, False)
-
-    loading_label = ttk.Label(
-        loading,
-        text="Reading initial CAD export...",
-        padding=20,
-        justify="center",
-    )
-    loading_label.pack(expand=True)
-
-    center_toplevel(loading)
-    loading.lift()
-    loading.attributes("-topmost", True)
-    loading.after(200, lambda: loading.attributes("-topmost", False))
-    loading.update()
-
-    first_section = load_export_section(first_cad_export)
-    loading.destroy()
-
-    dialog = MultiExportReorderDialog(root, [first_section], schematic_file)
-    root.wait_window(dialog.window)
-
-    if not dialog.result:
-        raise Exception("Operation cancelled.")
-
-    export_sections = dialog.export_sections
-
-    all_structure_rows = flatten_sections_to_rows(export_sections, schematic_file)
-    structure_df = pd.DataFrame(all_structure_rows)
-    structure_export_path = export_structure_excel(structure_df, output_pdf)
+    structure_df = load_structure_file(selected_input)
 
     part_col = find_column(structure_df, ["Part Number", "PartNumber", "Part #", "Part"])
-    desc_col = find_column(structure_df, ["Description", "Desc"])
-    level_col = find_column(structure_df, ["Level", "Level Code", "Structure Level"])
-
     items_to_download = sorted(
         {
             str(x).strip()
@@ -1544,9 +1494,6 @@ def main():
     )
 
     # --- Download progress window ---
-    sw = root.winfo_screenwidth()
-    sh = root.winfo_screenheight()
-
     progress_win = tk.Toplevel(root)
     progress_win.title("Downloading")
     progress_win.geometry("460x130")
@@ -1583,162 +1530,13 @@ def main():
         items_to_download, drawings_folder, progress_callback=on_download_progress
     )
 
-    schematic_copy_path = os.path.join(drawings_folder, "__HYDRAULIC_SCHEMATIC__.pdf")
-    with open(schematic_file, "rb") as src, open(schematic_copy_path, "wb") as dst:
-        dst.write(src.read())
-
     progress_win.destroy()
 
-    raw_entries = []
-
-    for _, row in structure_df.iterrows():
-        part = "" if pd.isna(row[part_col]) else str(row[part_col]).strip()
-        desc = "" if pd.isna(row[desc_col]) else str(row[desc_col]).strip()
-        code_text = "" if pd.isna(row[level_col]) else str(row[level_col]).strip()
-        code_tuple = parse_level_code(code_text)
-
-        if code_text == "1":
-            filename = "__HYDRAULIC_SCHEMATIC__.pdf"
-        elif part:
-            filename = f"{part}.pdf"
-        else:
-            filename = None
-
-        raw_entries.append(
-            {
-                "code_text": code_text,
-                "code_tuple": code_tuple,
-                "item_number": "" if code_text == "1" else part,
-                "desc": desc,
-                "part": part,
-                "filename": filename,
-            }
-        )
-
-    toc_entries = build_hierarchy(raw_entries)
-    for i, entry in enumerate(toc_entries):
-        entry["toc_index"] = i
-    toc_display_entries = toc_entries + [
-        {
-            "desc": "Index",
-            "item_number": "",
-            "part": "",
-            "indent_level": 0,
-            "parent_index": None,
-            "filename": None,
-        }
-    ]
-
-    toc_packet, _, toc_pages = create_directory_pdf_bytes(toc_display_entries, "Table of Contents", None)
-    index_entries = _build_index_entries(toc_entries)
-    index_packet, _, index_pages = create_directory_pdf_bytes(index_entries, "Index", None, is_index=True)
-    _, effective_page_map, index_start_page = build_page_maps(toc_entries, drawings_folder, toc_pages)
-    toc_page_map = effective_page_map + [index_start_page]
-
-    toc_packet, toc_placements, _ = create_directory_pdf_bytes(
-        toc_display_entries,
-        "Table of Contents",
-        toc_page_map,
-    )
-    for entry in index_entries:
-        pages = []
-        for toc_index in entry["toc_indices"]:
-            page = effective_page_map[toc_index]
-            if page is not None and page not in pages:
-                pages.append(page)
-        entry["page_text"] = ", ".join(str(page + 1) for page in pages)
-    index_packet, index_placements, _ = create_directory_pdf_bytes(index_entries, "Index", None, is_index=True)
-    toc_reader = PdfReader(toc_packet)
-    index_reader = PdfReader(index_packet)
-
-    actual_toc_pages = len(toc_reader.pages)
-    actual_index_pages = len(index_reader.pages)
-    if actual_toc_pages != toc_pages or actual_index_pages != index_pages:
-        toc_pages = actual_toc_pages
-        index_pages = actual_index_pages
-        _, effective_page_map, index_start_page = build_page_maps(toc_entries, drawings_folder, toc_pages)
-        toc_page_map = effective_page_map + [index_start_page]
-
-        toc_packet, toc_placements, _ = create_directory_pdf_bytes(
-            toc_display_entries,
-            "Table of Contents",
-            toc_page_map,
-        )
-        for entry in index_entries:
-            pages = []
-            for toc_index in entry["toc_indices"]:
-                page = effective_page_map[toc_index]
-                if page is not None and page not in pages:
-                    pages.append(page)
-            entry["page_text"] = ", ".join(str(page + 1) for page in pages)
-        index_packet, index_placements, _ = create_directory_pdf_bytes(index_entries, "Index", None, is_index=True)
-        toc_reader = PdfReader(toc_packet)
-        index_reader = PdfReader(index_packet)
-
-    writer = PdfWriter()
-
-    for page in toc_reader.pages:
-        writer.add_page(page)
-
-    for entry in toc_entries:
-        filename = entry.get("filename")
-        if not filename:
-            continue
-
-        fpath = os.path.join(drawings_folder, filename)
-        if not os.path.exists(fpath):
-            continue
-
-        reader = PdfReader(fpath)
-        for page in reader.pages:
-            writer.add_page(page)
-
-    for page in index_reader.pages:
-        writer.add_page(page)
-
-    bookmark_refs = {}
-
-    for i, entry in enumerate(toc_entries):
-        target_page = effective_page_map[i]
-        if target_page is None:
-            continue
-
-        parent = None
-        parent_index = entry["parent_index"]
-
-        if parent_index is not None and parent_index in bookmark_refs:
-            parent = bookmark_refs[parent_index]
-
-        bookmark = writer.add_outline_item(
-            entry["desc"],
-            target_page,
-            parent=parent,
-        )
-        bookmark_refs[i] = bookmark
-
-    add_toc_hyperlinks(writer, toc_placements, toc_page_map, source_page_offset=0)
-
-    total_pages = len(writer.pages)
-    for i, page in enumerate(writer.pages):
-        add_page_number_overlay(page, i + 1, total_pages)
-
-    with open(output_pdf, "wb") as f:
-        writer.write(f)
-
-    # --- Missing drawings report ---
-    missing_files = []
-    for entry in toc_entries:
-        filename = entry.get("filename")
-        if filename and filename != "__HYDRAULIC_SCHEMATIC__.pdf":
-            fpath = os.path.join(drawings_folder, filename)
-            if not os.path.exists(fpath):
-                missing_files.append(os.path.splitext(filename)[0])
-
-    warning_items = sorted(set(not_found + missing_files))
+    warning_items = sorted(set(not_found))
 
     # Write missing list to a text file next to the output PDF
     if warning_items:
-        missing_txt_path = os.path.splitext(output_pdf)[0] + "_missing_drawings.txt"
+        missing_txt_path = os.path.join(drawings_folder, "missing_drawings.txt")
         try:
             with open(missing_txt_path, "w", encoding="utf-8") as f:
                 f.write("Missing / not-found drawings\n")
@@ -1752,11 +1550,9 @@ def main():
         missing_txt_path = None
 
     message = (
-        f"Automated Drawing Packet Builder v{APP_VERSION}\n\n"
-        f"CAD exports used: {len(export_sections)}\n"
-        f"Schematic used: {os.path.basename(schematic_file)}\n"
-        f"Exported structure: {structure_export_path}\n"
-        f"Compiled PDF: {output_pdf}\n\n"
+        f"Automated Drawing Downloader v{APP_VERSION}\n\n"
+        f"Structure file: {selected_input}\n"
+        f"Download folder: {drawings_folder}\n\n"
         f"Downloaded drawings: {len(downloaded)}"
     )
 
