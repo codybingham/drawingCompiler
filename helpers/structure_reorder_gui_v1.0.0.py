@@ -134,6 +134,7 @@ class ReorderWindow:
         tools.pack(fill="x", pady=10)
 
         ttk.Button(tools, text="Open Structure", command=self.load_structure).pack(side="left")
+        ttk.Button(tools, text="Add Structure", command=self.add_structure).pack(side="left", padx=8)
         ttk.Button(tools, text="Save As", command=self.save_structure).pack(side="left", padx=8)
 
         info = (
@@ -191,6 +192,13 @@ class ReorderWindow:
         self.root.bind("<Control-z>", lambda _e: self.on_undo())
         self.update_buttons()
 
+
+    @staticmethod
+    def _merge_models(base_model: StructureModel, incoming_model: StructureModel) -> None:
+        for node in incoming_model.root.children:
+            node.parent = base_model.root
+            base_model.root.children.append(node)
+
     def load_structure(self) -> None:
         file_path = filedialog.askopenfilename(
             title="Select structure Excel file",
@@ -209,6 +217,28 @@ class ReorderWindow:
             self.update_buttons()
         except Exception as exc:
             messagebox.showerror("Error", f"Could not open structure file:\n{exc}")
+
+    def add_structure(self) -> None:
+        file_path = filedialog.askopenfilename(
+            title="Select another structure Excel file",
+            filetypes=[("Excel files", "*.xlsx *.xlsm *.xls"), ("All files", "*.*")],
+        )
+        if not file_path:
+            return
+
+        try:
+            df = pd.read_excel(file_path)
+            incoming = StructureModel.from_dataframe(df)
+            if self.model is None:
+                self.model = incoming
+                self.source_file = file_path
+            else:
+                self._merge_models(self.model, incoming)
+            self.populate_tree()
+            self.apply_default_tree_layout()
+            self.update_buttons()
+        except Exception as exc:
+            messagebox.showerror("Error", f"Could not add structure file:\n{exc}")
 
     def save_structure(self) -> None:
         if not self.model:

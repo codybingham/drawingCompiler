@@ -166,15 +166,19 @@ def convert_to_structure(df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, str]
     return out_df, mapping
 
 
-def run_conversion(input_path: str, output_path: str) -> dict:
-    source_df = read_cad_export(input_path)
+def run_conversion(input_paths: list[str], output_path: str) -> dict:
+    if not input_paths:
+        raise ValueError("At least one CAD export file is required.")
+
+    source_frames = [read_cad_export(path) for path in input_paths]
+    source_df = pd.concat(source_frames, ignore_index=True)
     structure_df, mapping = convert_to_structure(source_df)
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     structure_df.to_excel(output_path, index=False)
 
     return {
-        "input_path": input_path,
+        "input_paths": input_paths,
         "output_path": output_path,
         "source_rows": len(source_df),
         "output_rows": len(structure_df),
@@ -186,20 +190,22 @@ def run_gui() -> None:
     root = tk.Tk()
     root.withdraw()
 
-    input_path = filedialog.askopenfilename(
-        title="Select CAD export file",
+    input_paths = list(filedialog.askopenfilenames(
+        title="Select CAD export file(s)",
         filetypes=[
             ("Supported files", "*.xlsx *.xlsm *.xls *.csv"),
             ("Excel files", "*.xlsx *.xlsm *.xls"),
             ("CSV files", "*.csv"),
             ("All files", "*.*"),
         ],
-    )
-    if not input_path:
+    ))
+    if not input_paths:
         return
 
-    base_name = os.path.splitext(os.path.basename(input_path))[0]
-    default_output = os.path.join(os.path.dirname(input_path), f"{base_name}_structure.xlsx")
+    first_path = input_paths[0]
+    base_name = os.path.splitext(os.path.basename(first_path))[0]
+    suffix = "_combined" if len(input_paths) > 1 else ""
+    default_output = os.path.join(os.path.dirname(first_path), f"{base_name}{suffix}_structure.xlsx")
 
     output_path = filedialog.asksaveasfilename(
         title="Save generated structure file",
@@ -212,7 +218,7 @@ def run_gui() -> None:
         return
 
     try:
-        result = run_conversion(input_path, output_path)
+        result = run_conversion(input_paths, output_path)
     except Exception as exc:
         messagebox.showerror("Conversion Error", str(exc))
         return
@@ -222,7 +228,7 @@ def run_gui() -> None:
         "Conversion Complete",
         "\n".join(
             [
-                f"Input: {result['input_path']}",
+                f"Inputs: {len(result['input_paths'])} file(s)",
                 f"Output: {result['output_path']}",
                 f"Rows read: {result['source_rows']}",
                 f"Rows written: {result['output_rows']}",
@@ -240,7 +246,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Generate a structure Excel file from a CAD export using automated compiler hierarchy rules."
     )
-    parser.add_argument("--input", dest="input_path", help="Path to CAD export file")
+    parser.add_argument("--input", dest="input_paths", nargs="+", help="Path(s) to CAD export file(s)")
     parser.add_argument("--output", dest="output_path", help="Path for output structure .xlsx")
     return parser
 
@@ -249,8 +255,8 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
-    if args.input_path and args.output_path:
-        result = run_conversion(args.input_path, args.output_path)
+    if args.input_paths and args.output_path:
+        result = run_conversion(args.input_paths, args.output_path)
         print(f"Wrote structure file: {result['output_path']}")
         print(f"Rows written: {result['output_rows']}")
         return
