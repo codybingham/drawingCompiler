@@ -406,8 +406,10 @@ def read_cad_export(path: str) -> pd.DataFrame:
     raise ValueError("Unsupported input file type. Use .xlsx/.xlsm/.xls/.csv")
 
 
-def convert_cad_to_structure(input_path: str, output_path: str) -> dict:
-    df = read_cad_export(input_path)
+def convert_cad_to_structure(input_paths: list[str], output_path: str) -> dict:
+    if not input_paths:
+        raise ValueError("At least one CAD export file is required.")
+    df = pd.concat([read_cad_export(path) for path in input_paths], ignore_index=True)
     object_col = find_column(df, ["Object"])
     name_col = find_column(df, ["Name"])
     item_col = find_column(df, ["Item Number", "ItemNumber", "Item No", "Item"])
@@ -452,7 +454,7 @@ def convert_cad_to_structure(input_path: str, output_path: str) -> dict:
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     out_df.to_excel(output_path, index=False)
     return {
-        "input_path": input_path, "output_path": output_path,
+        "input_paths": input_paths, "output_path": output_path,
         "source_rows": len(df), "rows_written": len(out_df),
         "mapping": {"object_col": object_col, "name_col": name_col, "item_number_col": item_col},
     }
@@ -1584,10 +1586,21 @@ class DrawingCompilerStudio(tk.Tk):
 
         input_var = tk.StringVar()
         output_var = tk.StringVar()
+        cad_input_paths: list[str] = []
 
-        self._field(card, "CAD export file (.xlsx / .xlsm / .xls / .csv)", input_var,
-                    lambda: self._browse_file(input_var, output_var, "_structure", ".xlsx",
-                                               [("Supported", "*.xlsx *.xlsm *.xls *.csv"), ("All", "*.*")]))
+        def pick_cad_files():
+            nonlocal cad_input_paths
+            paths = list(filedialog.askopenfilenames(filetypes=[("Supported", "*.xlsx *.xlsm *.xls *.csv"), ("All", "*.*")]))
+            if not paths:
+                return
+            cad_input_paths = paths
+            input_var.set("; ".join(paths))
+            if not output_var.get().strip():
+                base = os.path.splitext(os.path.basename(paths[0]))[0]
+                suffix = "_combined" if len(paths) > 1 else ""
+                output_var.set(default_output_path(paths[0], f"{suffix}_structure", ".xlsx"))
+
+        self._field(card, "CAD export file(s) (.xlsx / .xlsm / .xls / .csv)", input_var, pick_cad_files)
 
         self._divider(card)
         self._section_label(card, "Output")
@@ -1597,14 +1610,14 @@ class DrawingCompilerStudio(tk.Tk):
                     "Save as…")
 
         def run():
-            if not input_var.get() or not output_var.get():
+            if not cad_input_paths or not output_var.get():
                 messagebox.showwarning("Missing fields", "Choose input and output files.", parent=self)
                 return
             try:
-                result = convert_cad_to_structure(input_var.get(), output_var.get())
+                result = convert_cad_to_structure(cad_input_paths, output_var.get())
                 m = result["mapping"]
                 messagebox.showinfo("Conversion complete",
-                    f"Input:   {result['input_path']}\n"
+                    f"Inputs:  {len(result['input_paths'])} file(s)\n"
                     f"Output:  {result['output_path']}\n\n"
                     f"Rows read:    {result['source_rows']}\n"
                     f"Rows written: {result['rows_written']}\n\n"
@@ -1720,6 +1733,31 @@ class DrawingCompilerStudio(tk.Tk):
             self._reorder_apply_default_tree_layout()
         except Exception as exc:
             messagebox.showerror("Open failed", str(exc), parent=self)
+
+
+    def _reorder_merge_models(self, base_model: StructureModel, incoming_model: StructureModel):
+        for node in incoming_model.root.children:
+            node.parent = base_model.root
+            base_model.root.children.append(node)
+
+    def _reorder_add_file(self):
+        path = filedialog.askopenfilename(filetypes=[("Excel", "*.xlsx *.xlsm *.xls"), ("All", "*.*")])
+        if not path:
+            return
+        try:
+            df = load_structure_for_reorder(path)
+            incoming = StructureModel.from_dataframe(df)
+            if self.reorder_model is None:
+                self.reorder_model = incoming
+                self.reorder_source_path = path
+            else:
+                self._reorder_merge_models(self.reorder_model, incoming)
+            if not self._reorder_tree_available():
+                self.show_workflow("reorder_structure", add_history=False)
+            self._reorder_refresh()
+            self._reorder_apply_default_tree_layout()
+        except Exception as exc:
+            messagebox.showerror("Add failed", str(exc), parent=self)
 
     def _reorder_save(self):
         if not self.reorder_model:
