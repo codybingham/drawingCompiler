@@ -2045,8 +2045,10 @@ class DrawingCompilerStudio(tk.Tk):
             ("add_file", "Add file", self._reorder_add_file, "Add one or more structure or CAD export files to the editor.", True, False),
             ("save", "Save structure", self._reorder_save, "Save the current editor structure as a workbook.", False, False),
             (None, None, None, None, None, None),
-            ("up", "Up", lambda: self._reorder_move(-1), "Move the selected row up among its siblings.", False, False),
-            ("down", "Down", lambda: self._reorder_move(1), "Move the selected row down among its siblings.", False, False),
+            ("up", "↑", lambda: self._reorder_move(-1), "Move the selected row up among its siblings.", False, False),
+            ("down", "↓", lambda: self._reorder_move(1), "Move the selected row down among its siblings.", False, False),
+            ("add_item", "Add item", self._reorder_add_item, "Manually add a row by entering its description and part number.", False, False),
+            ("delete", "Delete", self._reorder_remove, "Delete the selected row and its children from the structure.", False, True),
             ("make_child", "Make child", self._reorder_make_child, "Move the selected row under a new parent.", False, False),
             ("promote", "Promote", self._reorder_promote, "Move the selected row up one level.", False, False),
             (None, None, None, None, None, None),
@@ -2348,7 +2350,8 @@ class DrawingCompilerStudio(tk.Tk):
         states = {"add_file": "normal"}
         for key in ["save", "expand", "collapse", "clear"]:
             states[key] = "normal" if has_model else "disabled"
-        for key in ["make_child", "promote", "up", "down"]:
+        states["add_item"] = "normal"
+        for key in ["delete", "make_child", "promote", "up", "down"]:
             states[key] = "normal" if node else "disabled"
         states["undo"] = "normal" if self.reorder_undo_stack else "disabled"
         states["redo"] = "normal" if self.reorder_redo_stack else "disabled"
@@ -2504,6 +2507,21 @@ class DrawingCompilerStudio(tk.Tk):
             message = f"Moved '{node.description}' after '{target_node.description}'."
         self._reorder_set_drag_status(message)
 
+    def _reorder_last_visible_item(self):
+        if not self._reorder_tree_available():
+            return ""
+        item = ""
+        children = self.reorder_tree.get_children("")
+        if not children:
+            return ""
+        item = children[-1]
+        while self.reorder_tree.item(item, "open"):
+            children = self.reorder_tree.get_children(item)
+            if not children:
+                break
+            item = children[-1]
+        return item
+
     def _reorder_drop_plan(self, target_item, y):
         if not self.reorder_drag_item or not self.reorder_model:
             return None
@@ -2522,6 +2540,8 @@ class DrawingCompilerStudio(tk.Tk):
             return None
         _x, row_y, _w, row_h = bbox
         relative_y = (y - row_y) / max(row_h, 1)
+        if target_item == self._reorder_last_visible_item() and relative_y > 0.75:
+            return self.reorder_model.root, len(self.reorder_model.root.children), "top", self.reorder_model.root
         if relative_y < 0.25:
             siblings = target_node.parent.children if target_node.parent else self.reorder_model.root.children
             return target_node.parent or self.reorder_model.root, siblings.index(target_node), "before", target_node
@@ -2676,19 +2696,25 @@ class DrawingCompilerStudio(tk.Tk):
         return result[0]
 
     def _reorder_add_item(self):
-        if not self.reorder_model:
-            return
         values = self._reorder_prompt("Add Item")
         if not values:
             return
-        parent = self._reorder_parent_dialog(
-            "Select Parent",
-            "Select the parent for the new item, or choose Top level to add it as a top-level assembly.",
-            allow_top=True,
-        )
-        if parent is None:
-            return
-        self._reorder_snapshot()
+        if not self.reorder_model:
+            self._reorder_snapshot()
+            self.reorder_model = StructureModel()
+            parent = self.reorder_model.root
+        elif not self.reorder_model.root.children:
+            self._reorder_snapshot()
+            parent = self.reorder_model.root
+        else:
+            parent = self._reorder_parent_dialog(
+                "Select Parent",
+                "Select the parent for the new item, or choose Top level to add it as a top-level assembly.",
+                allow_top=True,
+            )
+            if parent is None:
+                return
+            self._reorder_snapshot()
         new_node = StructureNode("", values[0], values[1])
         parent.add_child(new_node)
         self._reorder_refresh(new_node)
