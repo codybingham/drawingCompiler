@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import tempfile
 import tkinter as tk
 from io import BytesIO
 from dataclasses import dataclass
@@ -55,7 +56,7 @@ def _register_arial_pdf_font():
 _register_arial_pdf_font()
 
 # ─── Palette ────────────────────────────────────────────────────────────────
-C = {
+DARK_PALETTE = {
     "bg":          "#0E1117",   # page background
     "surface":     "#161B24",   # sidebar / panel
     "card":        "#1C2333",   # card / raised surface
@@ -84,12 +85,38 @@ C = {
     "danger_muted":"#450A0A",
 }
 
+LIGHT_PALETTE = {
+    **DARK_PALETTE,
+    "bg":          "#F8FAFC",
+    "surface":     "#FFFFFF",
+    "card":        "#FFFFFF",
+    "card_hover":  "#EEF2FF",
+    "border":      "#CBD5E1",
+    "border_hi":   "#94A3B8",
+    "accent_muted":"#DBEAFE",
+    "green_muted": "#D1FAE5",
+    "amber_muted": "#FEF3C7",
+    "rose_muted":  "#FFE4E6",
+    "violet_muted":"#EDE9FE",
+    "text":        "#0F172A",
+    "text_dim":    "#334155",
+    "text_muted":  "#64748B",
+    "tag_bg":      "#E2E8F0",
+    "tag_text":    "#475569",
+    "sel_bg":      "#DBEAFE",
+    "sel_text":    "#1D4ED8",
+    "danger_muted":"#FEE2E2",
+}
+
+C = DARK_PALETTE.copy()
+
 WORKFLOW_META = {
     "manual_packet":    {"color": C["accent"],  "muted": C["accent_muted"]},
     "automated_packet": {"color": C["green"],   "muted": C["green_muted"]},
     "cad_to_structure": {"color": C["amber"],   "muted": C["amber_muted"]},
     "reorder_structure":{"color": C["violet"],  "muted": C["violet_muted"]},
     "reference_download":{"color": C["rose"],   "muted": C["rose_muted"]},
+    "settings":        {"color": C["accent"],  "muted": C["accent_muted"]},
 }
 
 
@@ -102,11 +129,10 @@ class Workflow:
 
 WORKFLOWS = [
     Workflow("dashboard",          "Dashboard",             "Unified control center"),
-    Workflow("manual_packet",      "Manual Packet",         "Build from local PDFs"),
     Workflow("automated_packet",   "Automated Packet",      "Download + build in one flow"),
-    Workflow("cad_to_structure",   "CAD to Structure",      "Convert CAD exports"),
-    Workflow("reorder_structure",  "Structure Reorder",     "Reorder and renumber levels"),
+    Workflow("reorder_structure",  "Structure Editor",      "Reorder and renumber levels"),
     Workflow("reference_download", "Drawing Downloader",    "Download drawing references"),
+    Workflow("settings",           "Settings",              "Preferences and defaults"),
 ]
 
 
@@ -544,7 +570,7 @@ def convert_cad_exports_to_structure(input_paths: list[str], output_path: str) -
 
 
 def read_structure_references(structure_path: str) -> tuple[list[str], list[str]]:
-    df = pd.read_excel(structure_path)
+    df = read_cad_export(structure_path)
     part_col = find_column(df, ["Part Number", "Item Number", "Part", "Item"])
     url_col = find_column(df, ["File URL", "Url", "PDF URL", "Link", "Path"])
     if not part_col and not url_col:
@@ -815,7 +841,7 @@ def build_automated_packet(input_paths, schematic_pdf, temp_download_folder, out
 
 
 def load_structure_for_reorder(path: str) -> pd.DataFrame:
-    df = pd.read_excel(path)
+    df = read_cad_export(path)
     level_col = find_column(df, ["Level"])
     desc_col = find_column(df, ["Description"])
     part_col = find_column(df, ["Part Number"])
@@ -1063,10 +1089,16 @@ class DrawingCompilerStudio(tk.Tk):
         self.reorder_item_lookup: dict[str, StructureNode] = {}
         self.reorder_open_state: dict[tuple[str, str], bool] = {}
         self.reorder_loaded_files: set[str] = set()
-        self.reorder_toolbar_buttons: dict[str, tk.Button] = {}
+        self.reorder_toolbar_buttons: dict[str, object] = {}
         self.reorder_undo_stack: list[tuple] = []
+        self.reorder_drag_item: str | None = None
+        self.reorder_drag_target_item: str | None = None
+        self.reorder_drag_status_var: tk.StringVar | None = None
         self.config_data = self._load_config()
-        self.last_folder = self.config_data.get("last_folder") or os.getcwd()
+        self.theme_name = self.config_data.get("theme", "dark")
+        self.default_directory = self.config_data.get("default_directory") or ""
+        self.last_folder = self.config_data.get("last_folder") or self.default_directory or os.getcwd()
+        self._apply_theme_palette(self.theme_name)
 
         self._setup_styles()
         self._build_shell()
@@ -1083,11 +1115,46 @@ class DrawingCompilerStudio(tk.Tk):
             return {}
 
     def _save_config(self):
+        self.config_data.update({
+            "last_folder": self.last_folder,
+            "default_directory": self.default_directory,
+            "theme": self.theme_name,
+        })
         try:
             with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-                json.dump({"last_folder": self.last_folder}, f, indent=2)
+                json.dump(self.config_data, f, indent=2)
         except Exception:
             pass
+
+    def _apply_theme_palette(self, theme_name):
+        palette = LIGHT_PALETTE if theme_name == "light" else DARK_PALETTE
+        C.clear()
+        C.update(palette)
+        if hasattr(self, "theme_name"):
+            self.theme_name = "light" if theme_name == "light" else "dark"
+        for key, meta in WORKFLOW_META.items():
+            if key == "manual_packet":
+                meta.update({"color": C["accent"], "muted": C["accent_muted"]})
+            elif key == "automated_packet":
+                meta.update({"color": C["green"], "muted": C["green_muted"]})
+            elif key == "cad_to_structure":
+                meta.update({"color": C["amber"], "muted": C["amber_muted"]})
+            elif key == "reorder_structure":
+                meta.update({"color": C["violet"], "muted": C["violet_muted"]})
+            elif key == "reference_download":
+                meta.update({"color": C["rose"], "muted": C["rose_muted"]})
+            elif key == "settings":
+                meta.update({"color": C["accent"], "muted": C["accent_muted"]})
+
+    def _set_theme(self, theme_name):
+        self._apply_theme_palette(theme_name)
+        self._save_config()
+        self.configure(bg=C["bg"])
+        self._setup_styles()
+        for child in self.winfo_children():
+            child.destroy()
+        self._build_shell()
+        self.show_workflow(self.current, add_history=False)
 
     def _remember_path(self, path):
         paths = path if isinstance(path, (list, tuple)) else [path]
@@ -1168,6 +1235,15 @@ class DrawingCompilerStudio(tk.Tk):
             arrowsize=0,
         )
         style.map("Dark.Vertical.TScrollbar", background=[("active", C["border_hi"])])
+        style.configure(
+            "Dark.Horizontal.TScrollbar",
+            troughcolor=C["card"],
+            background=C["border"],
+            borderwidth=0,
+            relief="flat",
+            arrowsize=0,
+        )
+        style.map("Dark.Horizontal.TScrollbar", background=[("active", C["border_hi"])])
 
         # Progressbar (for any ttk use)
         style.configure(
@@ -1287,11 +1363,10 @@ class DrawingCompilerStudio(tk.Tk):
         self.nav_buttons: dict[str, tk.Button] = {}
         icons = {
             "dashboard":           "⊞",
-            "manual_packet":       "▤",
             "automated_packet":    "⚙",
-            "cad_to_structure":    "⇄",
             "reorder_structure":   "≡",
             "reference_download":  "↓",
+            "settings":            "⚙",
         }
         for wf in WORKFLOWS:
             btn = self._nav_btn(f, icons.get(wf.key, "·"), wf.title, wf.key)
@@ -1367,6 +1442,9 @@ class DrawingCompilerStudio(tk.Tk):
         for child in self.main_frame.winfo_children():
             child.destroy()
         self.reorder_tree = None
+        self.reorder_drag_item = None
+        self.reorder_drag_target_item = None
+        self.reorder_drag_status_var = None
 
     def _push(self):
         self.history.append(self.current)
@@ -1388,11 +1466,10 @@ class DrawingCompilerStudio(tk.Tk):
 
         dispatch = {
             "dashboard":           self._dashboard,
-            "manual_packet":       self._manual_packet_page,
             "automated_packet":    self._automated_packet_page,
-            "cad_to_structure":    self._cad_page,
             "reorder_structure":   self._reorder_page,
             "reference_download":  self._reference_page,
+            "settings":            self._settings_page,
         }
         dispatch.get(key, self._dashboard)()
 
@@ -1548,11 +1625,10 @@ class DrawingCompilerStudio(tk.Tk):
 
         cards_data = [wf for wf in WORKFLOWS if wf.key != "dashboard"]
         descriptions = {
-            "manual_packet":       "Build a merged PDF packet from local drawings and a structure workbook.",
-            "automated_packet":    "Ingest a CAD export, download drawings, and build a full packet in one flow.",
-            "cad_to_structure":    "Convert CAD export spreadsheets into the structure workbook format.",
-            "reorder_structure":   "Full editor: add, reorder, edit, and remove structure rows, then save.",
-            "reference_download":  "Download drawings by part number and URL from a structure workbook.",
+            "automated_packet":    "Ingest a CAD export or structure workbook, download drawings, and build a full packet in one flow.",
+            "reorder_structure":   "Full editor: add, reorder, edit, reparent, and remove structure rows, then save.",
+            "reference_download":  "Download drawings from a saved structure, CAD export, or the current Structure Editor data.",
+            "settings":            "Switch themes, choose the default browse folder, and review future preference ideas.",
         }
 
         for i, wf in enumerate(cards_data):
@@ -1605,6 +1681,20 @@ class DrawingCompilerStudio(tk.Tk):
             open_btn.bind("<Enter>", lambda e, b=open_btn, c=color: b.configure(bg=c, fg="#fff"))
             open_btn.bind("<Leave>", lambda e, b=open_btn, c=color, m=muted: b.configure(bg=m, fg=c))
             open_btn.pack(anchor="w")
+
+        ideas = self._card(main, pady=(8, 24))
+        self._section_label(ideas, "Dashboard ideas")
+        tk.Label(
+            ideas,
+            text=(
+                "• Continue last workflow with previously selected files and output folders.\n"
+                "• Show recent structures/CAD exports with one-click reopen.\n"
+                "• Display active Structure Editor status, including loaded file count and unsaved changes.\n"
+                "• Add quick actions for common sequences such as Add file → Download drawings.\n"
+                "• Surface warnings for missing default directories or unavailable print lookup service."
+            ),
+            bg=C["card"], fg=C["text_dim"], font=(APP_FONT, 10), justify="left", anchor="w", wraplength=820,
+        ).pack(fill="x")
 
     # ── Manual Packet ─────────────────────────────────────────────────────────
 
@@ -1809,10 +1899,10 @@ class DrawingCompilerStudio(tk.Tk):
         # Header (non-scrollable area at top)
         header_frame = tk.Frame(self.main_frame, bg=C["bg"])
         header_frame.pack(fill="x")
-        self._page_header(header_frame, "Structure Reorder",
-                          "Add, reorder, edit, and remove rows — then save a renumbered structure workbook.", color)
+        self._page_header(header_frame, "Structure Editor",
+                          "Add, reorder, edit, reparent, and remove rows — then save a renumbered structure workbook.", color)
 
-        # Toolbar
+        # Sleek responsive toolbar: primary actions stay visible and secondary actions live in More.
         toolbar = tk.Frame(self.main_frame, bg=C["bg"], padx=36, pady=12)
         toolbar.pack(fill="x")
 
@@ -1828,41 +1918,51 @@ class DrawingCompilerStudio(tk.Tk):
                 bg=bg, fg=fg,
                 activebackground=hover, activeforeground="#fff" if (accent or danger) else C["text"],
                 font=(APP_FONT, 9), bd=0, relief="flat", cursor="hand2",
-                padx=10, pady=6,
+                padx=12, pady=7,
             )
             btn.bind("<Enter>", lambda e: btn.configure(bg=hover, fg="#fff" if (accent or danger) else C["text"]))
             btn.bind("<Leave>", lambda e: btn.configure(bg=bg, fg=fg))
             btn.pack(side="left", padx=(0, 6))
             return btn
 
+        def register_menu_action(menu, key, label, command):
+            menu.add_command(label=label, command=command)
+            self.reorder_toolbar_buttons[key] = (menu, menu.index("end"))
+
         self.reorder_toolbar_buttons.clear()
-        self.reorder_toolbar_buttons["open"] = tool_btn("Open structure…", self._reorder_open, accent=True)
-        self.reorder_toolbar_buttons["load_structure"] = tool_btn("Load structure(s)…", self._reorder_load_structure_files)
-        self.reorder_toolbar_buttons["load_cad"] = tool_btn("Load CAD export(s)…", self._reorder_load_cad_exports)
+        self.reorder_toolbar_buttons["add_file"] = tool_btn("Add file…", self._reorder_add_file, accent=True)
+        self.reorder_toolbar_buttons["add_item"] = tool_btn("Add item", self._reorder_add_item)
+        self.reorder_toolbar_buttons["edit"] = tool_btn("Edit", lambda: self._reorder_edit())
         self.reorder_toolbar_buttons["save"] = tool_btn("Save as…", self._reorder_save)
 
-        tk.Frame(toolbar, bg=C["border"], width=1, height=24).pack(side="left", padx=10)
+        more = tk.Menubutton(
+            toolbar, text="More ▾", bg=C["border"], fg=C["text_dim"],
+            activebackground=C["border_hi"], activeforeground=C["text"],
+            font=(APP_FONT, 9), bd=0, relief="flat", cursor="hand2", padx=12, pady=7,
+        )
+        more_menu = tk.Menu(more, tearoff=False, bg=C["card"], fg=C["text"],
+                            activebackground=C["sel_bg"], activeforeground=C["sel_text"], bd=0)
+        more.configure(menu=more_menu)
+        more.pack(side="left", padx=(4, 0))
 
-        self.reorder_toolbar_buttons["add_top"] = tool_btn("Add assembly", lambda: self._reorder_add_top())
-        self.reorder_toolbar_buttons["add_child"] = tool_btn("Add child", lambda: self._reorder_add_child())
-        self.reorder_toolbar_buttons["add_sibling"] = tool_btn("Add sibling", lambda: self._reorder_add_sibling())
-        self.reorder_toolbar_buttons["edit"] = tool_btn("Edit", lambda: self._reorder_edit())
+        register_menu_action(more_menu, "up", "Move up", lambda: self._reorder_move(-1))
+        register_menu_action(more_menu, "down", "Move down", lambda: self._reorder_move(1))
+        register_menu_action(more_menu, "make_child", "Make child…", self._reorder_make_child)
+        register_menu_action(more_menu, "promote", "Promote", self._reorder_promote)
+        more_menu.add_separator()
+        register_menu_action(more_menu, "expand", "Expand all", lambda: self._reorder_expand(True))
+        register_menu_action(more_menu, "collapse", "Collapse all", lambda: self._reorder_expand(False))
+        more_menu.add_separator()
+        register_menu_action(more_menu, "undo", "Undo", lambda: self._reorder_undo())
+        register_menu_action(more_menu, "remove", "Delete", lambda: self._reorder_remove())
 
-        tk.Frame(toolbar, bg=C["border"], width=1, height=24).pack(side="left", padx=10)
-
-        self.reorder_toolbar_buttons["up"] = tool_btn("↑ Up", lambda: self._reorder_move(-1))
-        self.reorder_toolbar_buttons["down"] = tool_btn("↓ Down", lambda: self._reorder_move(1))
-        self.reorder_toolbar_buttons["child_of_prev"] = tool_btn("Make child of previous", self._reorder_make_child_of_previous)
-        self.reorder_toolbar_buttons["promote"] = tool_btn("Promote", self._reorder_promote)
-
-        tk.Frame(toolbar, bg=C["border"], width=1, height=24).pack(side="left", padx=10)
-
-        self.reorder_toolbar_buttons["remove"] = tool_btn("Delete", lambda: self._reorder_remove(), danger=True)
-        self.reorder_toolbar_buttons["undo"] = tool_btn("Undo", lambda: self._reorder_undo())
-
-        tk.Frame(toolbar, bg=C["border"], width=1, height=24).pack(side="left", padx=10)
-        self.reorder_toolbar_buttons["expand"] = tool_btn("Expand all", lambda: self._reorder_expand(True))
-        self.reorder_toolbar_buttons["collapse"] = tool_btn("Collapse all", lambda: self._reorder_expand(False))
+        self.reorder_drag_status_var = tk.StringVar(
+            value="Tip: drag rows to reorder them, drop in the middle to make a child, or near the top/bottom edge to place before/after."
+        )
+        tk.Label(
+            toolbar, textvariable=self.reorder_drag_status_var, bg=C["bg"], fg=C["text_muted"],
+            font=(APP_FONT, 9), anchor="w",
+        ).pack(side="left", fill="x", expand=True, padx=(16, 0))
 
         # Tree area
         tree_frame = tk.Frame(self.main_frame, bg=C["bg"], padx=36)
@@ -1896,7 +1996,11 @@ class DrawingCompilerStudio(tk.Tk):
         self.reorder_tree.bind("<Delete>", lambda _e: self._reorder_remove())
         self.reorder_tree.bind("<Control-z>", lambda _e: self._reorder_undo())
         self.reorder_tree.bind("<Control-Z>", lambda _e: self._reorder_undo())
+        self.reorder_tree.tag_configure("drop_target", background=C["border_hi"], foreground=C["text"])
         self.reorder_tree.bind("<Return>", lambda _e: self._reorder_edit())
+        self.reorder_tree.bind("<ButtonPress-1>", self._reorder_begin_drag)
+        self.reorder_tree.bind("<B1-Motion>", self._reorder_drag_motion)
+        self.reorder_tree.bind("<ButtonRelease-1>", self._reorder_drop)
         self._reorder_update_button_states()
 
     def _reorder_open(self):
@@ -1915,6 +2019,49 @@ class DrawingCompilerStudio(tk.Tk):
             self._reorder_refresh()
         except Exception as exc:
             messagebox.showerror("Open failed", str(exc), parent=self)
+
+    def _reorder_add_file(self):
+        paths = self._askopenfilenames(filetypes=[("Supported", "*.xlsx *.xlsm *.xls *.csv"), ("All", "*.*")])
+        if not paths:
+            return
+        new_paths = self._reorder_new_file_paths(paths, duplicate_title="Duplicate file")
+        if not new_paths:
+            return
+        try:
+            models = []
+            file_types = []
+            for path in new_paths:
+                kind = classify_workbook(path)
+                file_types.append(kind)
+                if kind == "structure":
+                    models.append(StructureModel.from_dataframe(load_structure_for_reorder(path)))
+                else:
+                    models.append(StructureModel.from_dataframe(cad_export_to_structure_dataframe(path)[0]))
+
+            replace_existing = False
+            if self.reorder_model and self.reorder_model.root.children:
+                choice = messagebox.askyesnocancel(
+                    "Add file",
+                    "Replace the current Structure Editor contents?\n\n"
+                    "Yes = replace with the selected file(s).\n"
+                    "No = append the selected file(s).\n"
+                    "Cancel = do nothing.",
+                    parent=self,
+                )
+                if choice is None:
+                    return
+                replace_existing = bool(choice)
+
+            if replace_existing:
+                self._reorder_snapshot()
+                self.reorder_model = StructureModel()
+                self.reorder_loaded_files.clear()
+                self.reorder_open_state.clear()
+                self.reorder_source_path = new_paths[0] if len(new_paths) == 1 and file_types[0] == "structure" else None
+
+            self._reorder_append_models(models, new_paths)
+        except Exception as exc:
+            messagebox.showerror("Add file failed", str(exc), parent=self)
 
     def _reorder_new_file_paths(self, paths, duplicate_title="Duplicate file"):
         duplicates = [path for path in paths if os.path.abspath(path) in self.reorder_loaded_files]
@@ -2033,10 +2180,10 @@ class DrawingCompilerStudio(tk.Tk):
             return
         has_model = self.reorder_model is not None
         node = self._reorder_selected_node() if self._reorder_tree_available() else None
-        states = {key: "normal" for key in ("open", "load_structure", "load_cad")}
-        for key in ["save", "add_top", "expand", "collapse"]:
+        states = {"add_file": "normal"}
+        for key in ["save", "add_item", "expand", "collapse"]:
             states[key] = "normal" if has_model else "disabled"
-        for key in ["add_child", "add_sibling", "edit", "remove", "child_of_prev", "promote", "up", "down"]:
+        for key in ["edit", "remove", "make_child", "promote", "up", "down"]:
             states[key] = "normal" if node else "disabled"
         states["undo"] = "normal" if self.reorder_undo_stack else "disabled"
         if node and node.parent:
@@ -2044,11 +2191,21 @@ class DrawingCompilerStudio(tk.Tk):
             idx = siblings.index(node)
             states["up"] = "normal" if idx > 0 else "disabled"
             states["down"] = "normal" if idx < len(siblings) - 1 else "disabled"
-            states["child_of_prev"] = "normal" if idx > 0 else "disabled"
+            states["make_child"] = "normal" if len(self.reorder_item_lookup) > 1 else "disabled"
             states["promote"] = "normal" if node.parent and node.parent.parent else "disabled"
-        for key, button in self.reorder_toolbar_buttons.items():
+        for key, control in self.reorder_toolbar_buttons.items():
             state = states.get(key, "normal")
-            button.configure(state=state, cursor=("hand2" if state == "normal" else "arrow"))
+            self._set_reorder_action_state(control, state)
+
+    def _set_reorder_action_state(self, control, state):
+        if isinstance(control, tuple):
+            menu, index = control
+            try:
+                menu.entryconfigure(index, state=state)
+            except tk.TclError:
+                pass
+        else:
+            control.configure(state=state, cursor=("hand2" if state == "normal" else "arrow"))
 
     def _reorder_selected_node(self):
         if not self._reorder_tree_available():
@@ -2058,6 +2215,130 @@ class DrawingCompilerStudio(tk.Tk):
 
     def _reorder_tree_available(self):
         return bool(self.reorder_tree and self.reorder_tree.winfo_exists())
+
+    def _reorder_item_for_node(self, wanted_node):
+        for item_id, node in self.reorder_item_lookup.items():
+            if node is wanted_node:
+                return item_id
+        return ""
+
+    def _reorder_clear_drop_target(self):
+        if self.reorder_tree and self.reorder_drag_target_item:
+            try:
+                self.reorder_tree.item(self.reorder_drag_target_item, tags=())
+            except tk.TclError:
+                pass
+        self.reorder_drag_target_item = None
+
+    def _reorder_set_drag_status(self, message):
+        if self.reorder_drag_status_var is not None:
+            self.reorder_drag_status_var.set(message)
+
+    def _reorder_begin_drag(self, event):
+        if not self._reorder_tree_available():
+            return
+        if self.reorder_tree.identify_region(event.x, event.y) not in {"tree", "cell"}:
+            return
+        item_id = self.reorder_tree.identify_row(event.y)
+        if not item_id or item_id not in self.reorder_item_lookup:
+            return
+        self.reorder_drag_item = item_id
+        self.reorder_tree.selection_set(item_id)
+        self.reorder_tree.focus(item_id)
+        node = self.reorder_item_lookup[item_id]
+        self._reorder_set_drag_status(f"Dragging '{node.description}'. Drop on a row to make it a child, or near an edge to place before/after.")
+        self._reorder_update_button_states()
+
+    def _reorder_drag_motion(self, event):
+        if not self.reorder_drag_item or not self._reorder_tree_available():
+            return
+        target_item = self.reorder_tree.identify_row(event.y)
+        plan = self._reorder_drop_plan(target_item, event.y)
+        self._reorder_clear_drop_target()
+        if not plan:
+            self.reorder_tree.configure(cursor="X_cursor")
+            self._reorder_set_drag_status("Drop not allowed here.")
+            return
+        _parent, _index, mode, target_node = plan
+        if target_item:
+            self.reorder_drag_target_item = target_item
+            self.reorder_tree.item(target_item, tags=("drop_target",))
+        self.reorder_tree.configure(cursor="hand2")
+        if mode == "top":
+            message = "Drop to move to the bottom of the top level."
+        elif mode == "inside":
+            message = f"Drop to make it a child of '{target_node.description}'."
+        elif mode == "before":
+            message = f"Drop to place it before '{target_node.description}'."
+        else:
+            message = f"Drop to place it after '{target_node.description}'."
+        self._reorder_set_drag_status(message)
+
+    def _reorder_drop(self, event):
+        if not self.reorder_drag_item or not self._reorder_tree_available():
+            self.reorder_drag_item = None
+            return
+        target_item = self.reorder_tree.identify_row(event.y)
+        plan = self._reorder_drop_plan(target_item, event.y)
+        drag_item = self.reorder_drag_item
+        self.reorder_drag_item = None
+        self._reorder_clear_drop_target()
+        self.reorder_tree.configure(cursor="")
+        if not plan:
+            self._reorder_set_drag_status("Drag canceled: that drop target is not valid.")
+            return
+        node = self.reorder_item_lookup.get(drag_item)
+        if not node or not node.parent:
+            self._reorder_set_drag_status("Drag canceled: selected row is no longer available.")
+            return
+        parent, index, mode, target_node = plan
+        if parent is node.parent:
+            old_index = node.parent.children.index(node)
+            if old_index < index:
+                index -= 1
+            if old_index == index:
+                self._reorder_set_drag_status("No change: item was dropped in its current position.")
+                return
+        self._reorder_snapshot()
+        node.parent.children.remove(node)
+        node.parent = parent
+        parent.children.insert(index, node)
+        self._reorder_refresh(node)
+        if mode == "top":
+            message = f"Moved '{node.description}' to the top level."
+        elif mode == "inside":
+            message = f"Moved '{node.description}' under '{target_node.description}'."
+        elif mode == "before":
+            message = f"Moved '{node.description}' before '{target_node.description}'."
+        else:
+            message = f"Moved '{node.description}' after '{target_node.description}'."
+        self._reorder_set_drag_status(message)
+
+    def _reorder_drop_plan(self, target_item, y):
+        if not self.reorder_drag_item or not self.reorder_model:
+            return None
+        dragged_node = self.reorder_item_lookup.get(self.reorder_drag_item)
+        if not dragged_node or not dragged_node.parent:
+            return None
+        if not target_item:
+            return self.reorder_model.root, len(self.reorder_model.root.children), "top", self.reorder_model.root
+        target_node = self.reorder_item_lookup.get(target_item)
+        if not target_node:
+            return None
+        if target_node is dragged_node or dragged_node.is_ancestor_of(target_node):
+            return None
+        bbox = self.reorder_tree.bbox(target_item) if self._reorder_tree_available() else ""
+        if not bbox:
+            return None
+        _x, row_y, _w, row_h = bbox
+        relative_y = (y - row_y) / max(row_h, 1)
+        if relative_y < 0.25:
+            siblings = target_node.parent.children if target_node.parent else self.reorder_model.root.children
+            return target_node.parent or self.reorder_model.root, siblings.index(target_node), "before", target_node
+        if relative_y > 0.75:
+            siblings = target_node.parent.children if target_node.parent else self.reorder_model.root.children
+            return target_node.parent or self.reorder_model.root, siblings.index(target_node) + 1, "after", target_node
+        return target_node, len(target_node.children), "inside", target_node
 
     def _reorder_prompt(self, title, desc="", part=""):
         dialog = tk.Toplevel(self)
@@ -2121,6 +2402,123 @@ class DrawingCompilerStudio(tk.Tk):
         dialog.geometry(f"{w}x{h}+{self.winfo_x() + (self.winfo_width()-w)//2}+{self.winfo_y() + (self.winfo_height()-h)//2}")
         self.wait_window(dialog)
         return result[0]
+
+    def _reorder_parent_dialog(self, title, prompt, excluded_node=None, allow_top=True):
+        if not self.reorder_model:
+            return None
+        dialog = tk.Toplevel(self)
+        dialog.title(title)
+        dialog.configure(bg=C["bg"])
+        dialog.transient(self)
+        dialog.grab_set()
+        dialog.resizable(True, True)
+
+        outer = tk.Frame(dialog, bg=C["card"], bd=0, highlightthickness=1, highlightbackground=C["border"])
+        outer.pack(fill="both", expand=True, padx=1, pady=1)
+        frame = tk.Frame(outer, bg=C["card"], padx=20, pady=16)
+        frame.pack(fill="both", expand=True)
+
+        tk.Label(frame, text=title.upper(), bg=C["card"], fg=C["text_muted"],
+                 font=(MONO_FONT, 9, "bold")).pack(anchor="w", pady=(0, 8))
+        tk.Label(frame, text=prompt, bg=C["card"], fg=C["text_dim"],
+                 font=(APP_FONT, 10), wraplength=560, justify="left").pack(fill="x", pady=(0, 12))
+
+        tree_frame = tk.Frame(frame, bg=C["border"], bd=0)
+        tree_frame.pack(fill="both", expand=True)
+        inner = tk.Frame(tree_frame, bg=C["card"])
+        inner.pack(fill="both", expand=True, padx=1, pady=1)
+        parent_tree = ttk.Treeview(inner, columns=("part",), show="tree headings", selectmode="browse", style="Reorder.Treeview")
+        parent_tree.heading("#0", text="PARENT", anchor="w")
+        parent_tree.heading("part", text="PART NUMBER", anchor="w")
+        parent_tree.column("#0", width=420, minwidth=220, anchor="w")
+        parent_tree.column("part", width=160, minwidth=80, anchor="w")
+        scroll = ttk.Scrollbar(inner, orient="vertical", command=parent_tree.yview, style="Dark.Vertical.TScrollbar")
+        parent_tree.configure(yscrollcommand=scroll.set)
+        scroll.pack(side="right", fill="y")
+        parent_tree.pack(side="left", fill="both", expand=True)
+
+        lookup = {}
+        if allow_top:
+            top_id = parent_tree.insert("", "end", text="  Top level", values=("",), open=True)
+            lookup[top_id] = self.reorder_model.root
+
+        def allowed(candidate):
+            if excluded_node is None:
+                return True
+            return candidate is not excluded_node and not excluded_node.is_ancestor_of(candidate)
+
+        def add_nodes(parent_id, nodes):
+            for node in nodes:
+                if not allowed(node):
+                    continue
+                item_id = parent_tree.insert(parent_id, "end", text=f"  {node.description}", values=(node.part_number,), open=True)
+                lookup[item_id] = node
+                add_nodes(item_id, node.children)
+
+        add_nodes("", self.reorder_model.root.children)
+        if lookup:
+            first = next(iter(lookup))
+            parent_tree.selection_set(first)
+            parent_tree.focus(first)
+
+        result = [None]
+
+        def on_ok():
+            sel = parent_tree.selection()
+            if not sel:
+                messagebox.showwarning("Required", "Select a parent or Top level.", parent=dialog)
+                return
+            result[0] = lookup.get(sel[0])
+            dialog.destroy()
+
+        btns = tk.Frame(frame, bg=C["card"])
+        btns.pack(anchor="e", pady=(14, 0))
+        tk.Button(btns, text="Cancel", command=dialog.destroy, bg=C["card"], fg=C["text_dim"],
+                  activebackground=C["border"], activeforeground=C["text"], font=(APP_FONT, 9),
+                  bd=0, relief="flat", cursor="hand2", padx=12, pady=6).pack(side="right")
+        ok = self._run_btn(btns, "OK", on_ok, WORKFLOW_META["reorder_structure"]["color"])
+        ok.pack(side="right", padx=(0, 8))
+        parent_tree.bind("<Double-1>", lambda _e: on_ok())
+
+        w, h = 640, 520
+        dialog.geometry(f"{w}x{h}+{self.winfo_x() + (self.winfo_width()-w)//2}+{self.winfo_y() + (self.winfo_height()-h)//2}")
+        self.wait_window(dialog)
+        return result[0]
+
+    def _reorder_add_item(self):
+        if not self.reorder_model:
+            return
+        values = self._reorder_prompt("Add Item")
+        if not values:
+            return
+        parent = self._reorder_parent_dialog(
+            "Select Parent",
+            "Select the parent for the new item, or choose Top level to add it as a top-level assembly.",
+            allow_top=True,
+        )
+        if parent is None:
+            return
+        self._reorder_snapshot()
+        new_node = StructureNode("", values[0], values[1])
+        parent.add_child(new_node)
+        self._reorder_refresh(new_node)
+
+    def _reorder_make_child(self):
+        node = self._reorder_selected_node()
+        if not node or not node.parent:
+            return
+        parent = self._reorder_parent_dialog(
+            "Make Child",
+            f"Select the new parent for '{node.description}'. Descendants and the selected item itself are hidden to prevent cycles.",
+            excluded_node=node,
+            allow_top=True,
+        )
+        if parent is None or parent is node.parent:
+            return
+        self._reorder_snapshot()
+        node.parent.children.remove(node)
+        parent.add_child(node)
+        self._reorder_refresh(node)
 
     def _reorder_add_top(self):
         if not self.reorder_model:
@@ -2240,13 +2638,34 @@ class DrawingCompilerStudio(tk.Tk):
         for item in self.reorder_tree.get_children():
             toggle(item, force_open=not expand)
 
+    def _current_reorder_structure_path_for_download(self):
+        if not self.reorder_model or not self.reorder_model.root.children:
+            raise ValueError("No Structure Editor data is loaded.")
+        tmp = tempfile.NamedTemporaryFile(prefix="structure_editor_", suffix=".xlsx", delete=False)
+        tmp.close()
+        self.reorder_model.to_dataframe().to_excel(tmp.name, index=False)
+        return tmp.name
+
+    def _prepare_reference_input(self, input_value):
+        value = input_value.strip()
+        if value == "__CURRENT_STRUCTURE_EDITOR__":
+            return self._current_reorder_structure_path_for_download(), "current Structure Editor data"
+        kind = classify_workbook(value)
+        if kind == "structure":
+            return value, "structure workbook"
+        frame, _details = cad_export_to_structure_dataframe(value)
+        tmp = tempfile.NamedTemporaryFile(prefix="cad_export_structure_", suffix=".xlsx", delete=False)
+        tmp.close()
+        frame.to_excel(tmp.name, index=False)
+        return tmp.name, "CAD export"
+
     # ── Reference Download ────────────────────────────────────────────────────
 
     def _reference_page(self):
         main = self._scrollable_main()
         color = WORKFLOW_META["reference_download"]["color"]
         self._page_header(main, "Drawing Downloader",
-                          "Download drawings referenced in a structure workbook by part number or direct URL.", color)
+                          "Download drawings from a structure workbook, CAD export, or current Structure Editor data.", color)
 
         card = self._card(main)
         self._section_label(card, "Inputs")
@@ -2254,9 +2673,27 @@ class DrawingCompilerStudio(tk.Tk):
         structure_var = tk.StringVar()
         output_var = tk.StringVar()
 
-        self._field(card, "Structure workbook (.xlsx)", structure_var,
-                    lambda: structure_var.set(
-                        self._askopenfilename(filetypes=[("Excel", "*.xlsx *.xlsm *.xls"), ("All", "*.*")]) or structure_var.get()))
+        source_options = []
+        if self.reorder_model and self.reorder_model.root.children:
+            source_options.append("Use current Structure Editor data")
+        option_map = {"Use current Structure Editor data": "__CURRENT_STRUCTURE_EDITOR__"}
+
+        row_frame = tk.Frame(card, bg=C["card"])
+        row_frame.pack(fill="x", pady=(0, 14))
+        tk.Label(row_frame, text="Structure workbook or CAD export", bg=C["card"], fg=C["text_dim"],
+                 font=(APP_FONT, 9), anchor="w").pack(fill="x", pady=(0, 4))
+        input_row = tk.Frame(row_frame, bg=C["card"])
+        input_row.pack(fill="x")
+        source_combo = ttk.Combobox(input_row, textvariable=structure_var, values=source_options, font=(MONO_FONT, 9))
+        source_combo.pack(side="left", fill="x", expand=True, ipady=5)
+
+        def browse_reference_input():
+            path = self._askopenfilename(filetypes=[("Supported", "*.xlsx *.xlsm *.xls *.csv"), ("All", "*.*")])
+            if path:
+                structure_var.set(path)
+
+        browse = self._small_btn(input_row, "Browse…", browse_reference_input)
+        browse.pack(side="left", padx=(8, 0))
 
         self._divider(card)
         self._section_label(card, "Output")
@@ -2272,7 +2709,10 @@ class DrawingCompilerStudio(tk.Tk):
             result = None
             error = None
             try:
-                result = download_references(structure_var.get(), output_var.get(), progress_callback=progress.update)
+                selected_input = option_map.get(structure_var.get(), structure_var.get())
+                structure_path, input_kind = self._prepare_reference_input(selected_input)
+                result = download_references(structure_path, output_var.get(), progress_callback=progress.update)
+                result["input_kind"] = input_kind
             except Exception as exc:
                 error = str(exc)
             finally:
@@ -2282,6 +2722,7 @@ class DrawingCompilerStudio(tk.Tk):
                 return
             self._show_themed_dialog(
                 "Download complete",
+                f"Input:       {result.get('input_kind', 'structure workbook')}\n"
                 f"Downloaded:  {len(result['downloaded'])}\n"
                 f"Skipped:     {len(result['skipped'])}\n"
                 f"Not found:   {len(result['missing_parts'])}\n"
@@ -2295,6 +2736,71 @@ class DrawingCompilerStudio(tk.Tk):
         run_btn = self._run_btn(card, "Download Drawings", run, color)
         run_btn.pack(anchor="w")
         self._bind_enabled_state(run_btn, [structure_var, output_var])
+
+    # ── Settings ───────────────────────────────────────────────────────────────
+
+    def _settings_page(self):
+        main = self._scrollable_main()
+        color = WORKFLOW_META["settings"]["color"]
+        self._page_header(main, "Settings", "Application preferences and defaults", color)
+
+        card = self._card(main)
+        self._section_label(card, "Appearance")
+        theme_var = tk.StringVar(value=self.theme_name)
+        theme_row = tk.Frame(card, bg=C["card"])
+        theme_row.pack(fill="x", pady=(0, 14))
+        tk.Label(theme_row, text="Theme", bg=C["card"], fg=C["text_dim"],
+                 font=(APP_FONT, 9), anchor="w").pack(fill="x", pady=(0, 8))
+        for value, label in [("dark", "Dark mode"), ("light", "Light mode")]:
+            rb = tk.Radiobutton(
+                theme_row, text=label, variable=theme_var, value=value,
+                command=lambda v=value: self._set_theme(v),
+                bg=C["card"], fg=C["text_dim"], selectcolor=C["surface"],
+                activebackground=C["card"], activeforeground=C["text"],
+                font=(APP_FONT, 10), bd=0, highlightthickness=0,
+            )
+            rb.pack(side="left", padx=(0, 18))
+
+        self._divider(card)
+        self._section_label(card, "Default directory")
+        directory_var = tk.StringVar(value=self.default_directory)
+        self._field(
+            card,
+            "Folder used first when browsing for files",
+            directory_var,
+            lambda: directory_var.set(self._askdirectory() or directory_var.get()),
+            "Browse folder…",
+        )
+
+        btn_row = tk.Frame(card, bg=C["card"])
+        btn_row.pack(fill="x")
+
+        def save_directory():
+            path = directory_var.get().strip()
+            if path and not os.path.isdir(path):
+                messagebox.showerror("Invalid directory", "Choose an existing folder.", parent=self)
+                return
+            self.default_directory = path
+            self.last_folder = path or self.last_folder
+            self._save_config()
+            self._show_themed_dialog("Settings saved", "Your default directory preference has been saved.", tone="info")
+
+        save_btn = self._run_btn(btn_row, "Save Settings", save_directory, color)
+        save_btn.pack(anchor="w")
+
+        suggestions = self._card(main)
+        self._section_label(suggestions, "Suggested settings to add next")
+        tk.Label(
+            suggestions,
+            text=(
+                "• Remember the last workflow and selected input/output files so the dashboard can offer Continue last workflow.\n"
+                "• Add default output naming templates for packets, structure exports, and download folders.\n"
+                "• Store preferred hydraulic schematic PDF and drawing download folder.\n"
+                "• Add validation preferences, such as warning before overwriting existing output files.\n"
+                "• Add network settings for the print lookup service URL and timeout."
+            ),
+            bg=C["card"], fg=C["text_dim"], font=(APP_FONT, 10), justify="left", anchor="w", wraplength=760,
+        ).pack(fill="x")
 
     # ── Shared file browse helper ─────────────────────────────────────────────
 
