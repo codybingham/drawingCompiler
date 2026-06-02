@@ -55,11 +55,15 @@ drawingCompiler/
 - Internal network dependencies for the automated tool are documented in `automated/README.md`.
 
 ## Quick Start
+### Drawing Compiler Studio User Manual
+- Program: `all_in_one_aesthetic.py`
+- Documentation: `ALL_IN_ONE_AESTHETIC_USER_MANUAL.md`
+
 ### Drawing Compiler Studio (Recommended)
 Run the root program to access all workflows from one cohesive GUI:
 
 ```bash
-python drawing_compiler_launcher.py
+python all_in_one_aesthetic.py
 ```
 
 The studio is implemented as a single-file program with unified workflow pages, so the project behaves like one cohesive application.
