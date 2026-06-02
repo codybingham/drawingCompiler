@@ -33,6 +33,14 @@ MONO_FONT = "Arial"
 PDF_FONT = "Helvetica"
 PDF_BOLD_FONT = "Helvetica-Bold"
 CONFIG_PATH = os.path.join(os.path.expanduser("~"), ".drawing_compiler_studio.json")
+DEFAULT_NAMING_TEMPLATES = {
+    "manual_packet": "{base}_packet",
+    "automated_packet": "{base}_automated_packet",
+    "structure_export": "{base}_structure",
+    "structure_editor": "{base}_reordered",
+    "drawing_download_folder": "{base}_drawings",
+}
+
 
 
 def _register_arial_pdf_font():
@@ -952,11 +960,24 @@ class StructureModel:
         return pd.DataFrame(rows, columns=["Level", "Description", "Part Number"])
 
 
-def default_output_path(input_path, suffix, extension):
+def render_naming_template(template, input_path, extension=""):
+    base = os.path.splitext(os.path.basename(input_path))[0] if input_path else "output"
+    safe_template = (template or "{base}").strip() or "{base}"
+    try:
+        name = safe_template.format(base=base, ext=extension.lstrip("."), extension=extension)
+    except (KeyError, IndexError, ValueError):
+        name = f"{base}_{safe_template}"
+    name = name.strip() or base
+    if extension and not name.lower().endswith(extension.lower()):
+        name = f"{name}{extension}"
+    return name
+
+
+def default_output_path(input_path, suffix, extension, template=None):
     if not input_path:
         return ""
-    base = os.path.splitext(os.path.basename(input_path))[0]
-    return os.path.join(os.path.dirname(input_path), f"{base}{suffix}{extension}")
+    name = render_naming_template(template or f"{{base}}{suffix}", input_path, extension)
+    return os.path.join(os.path.dirname(input_path), name)
 
 
 def summarize_list(values, limit=10):
@@ -1093,10 +1114,12 @@ class DrawingCompilerStudio(tk.Tk):
         self.reorder_undo_stack: list[tuple] = []
         self.reorder_drag_item: str | None = None
         self.reorder_drag_target_item: str | None = None
+        self.reorder_drop_indicator: tk.Frame | None = None
         self.reorder_drag_status_var: tk.StringVar | None = None
         self.config_data = self._load_config()
         self.theme_name = self.config_data.get("theme", "dark")
         self.default_directory = self.config_data.get("default_directory") or ""
+        self.naming_templates = self._load_naming_templates()
         self.last_folder = self.config_data.get("last_folder") or self.default_directory or os.getcwd()
         self._apply_theme_palette(self.theme_name)
 
@@ -1114,11 +1137,21 @@ class DrawingCompilerStudio(tk.Tk):
         except Exception:
             return {}
 
+    def _load_naming_templates(self):
+        templates = DEFAULT_NAMING_TEMPLATES.copy()
+        saved = self.config_data.get("naming_templates")
+        if isinstance(saved, dict):
+            for key, value in saved.items():
+                if key in templates and isinstance(value, str) and value.strip():
+                    templates[key] = value.strip()
+        return templates
+
     def _save_config(self):
         self.config_data.update({
             "last_folder": self.last_folder,
             "default_directory": self.default_directory,
             "theme": self.theme_name,
+            "naming_templates": self.naming_templates,
         })
         try:
             with open(CONFIG_PATH, "w", encoding="utf-8") as f:
@@ -1628,7 +1661,7 @@ class DrawingCompilerStudio(tk.Tk):
             "automated_packet":    "Ingest a CAD export or structure workbook, download drawings, and build a full packet in one flow.",
             "reorder_structure":   "Full editor: add, reorder, edit, reparent, and remove structure rows, then save.",
             "reference_download":  "Download drawings from a saved structure, CAD export, or the current Structure Editor data.",
-            "settings":            "Switch themes, choose the default browse folder, and review future preference ideas.",
+            "settings":            "Switch themes, choose the default browse folder, and configure default output naming templates.",
         }
 
         for i, wf in enumerate(cards_data):
@@ -1682,19 +1715,7 @@ class DrawingCompilerStudio(tk.Tk):
             open_btn.bind("<Leave>", lambda e, b=open_btn, c=color, m=muted: b.configure(bg=m, fg=c))
             open_btn.pack(anchor="w")
 
-        ideas = self._card(main, pady=(8, 24))
-        self._section_label(ideas, "Dashboard ideas")
-        tk.Label(
-            ideas,
-            text=(
-                "• Continue last workflow with previously selected files and output folders.\n"
-                "• Show recent structures/CAD exports with one-click reopen.\n"
-                "• Display active Structure Editor status, including loaded file count and unsaved changes.\n"
-                "• Add quick actions for common sequences such as Add file → Download drawings.\n"
-                "• Surface warnings for missing default directories or unavailable print lookup service."
-            ),
-            bg=C["card"], fg=C["text_dim"], font=(APP_FONT, 10), justify="left", anchor="w", wraplength=820,
-        ).pack(fill="x")
+
 
     # ── Manual Packet ─────────────────────────────────────────────────────────
 
@@ -1714,7 +1735,8 @@ class DrawingCompilerStudio(tk.Tk):
 
         self._field(card, "Structure workbook (.xlsx)", structure_var,
                     lambda: self._browse_file(structure_var, output_var, "_packet", ".pdf",
-                                               [("Excel", "*.xlsx *.xlsm *.xls"), ("All", "*.*")]))
+                                               [("Excel", "*.xlsx *.xlsm *.xls"), ("All", "*.*")],
+                                               "manual_packet"))
         self._field(card, "Drawings folder", drawings_var,
                     lambda: drawings_var.set(self._askdirectory() or drawings_var.get()),
                     "Browse folder…")
@@ -1787,7 +1809,8 @@ class DrawingCompilerStudio(tk.Tk):
 
         self._field(card, "CAD export(s) or structure workbook", cad_var,
                     lambda: self._browse_files(cad_var, output_var, "_automated_packet", ".pdf",
-                                               [("Supported", "*.xlsx *.xlsm *.xls *.csv"), ("All", "*.*")]))
+                                               [("Supported", "*.xlsx *.xlsm *.xls *.csv"), ("All", "*.*")],
+                                               "automated_packet"))
         self._field(card, "Hydraulic schematic PDF", schematic_var,
                     lambda: schematic_var.set(
                         self._askopenfilename(filetypes=[("PDF", "*.pdf"), ("All", "*.*")]) or schematic_var.get()))
@@ -1863,7 +1886,8 @@ class DrawingCompilerStudio(tk.Tk):
 
         self._field(card, "CAD export file(s) (.xlsx / .xlsm / .xls / .csv)", input_var,
                     lambda: self._browse_files(input_var, output_var, "_structure", ".xlsx",
-                                               [("Supported", "*.xlsx *.xlsm *.xls *.csv"), ("All", "*.*")]))
+                                               [("Supported", "*.xlsx *.xlsm *.xls *.csv"), ("All", "*.*")],
+                                               "structure_export"))
 
         self._divider(card)
         self._section_label(card, "Output")
@@ -1902,7 +1926,7 @@ class DrawingCompilerStudio(tk.Tk):
         self._page_header(header_frame, "Structure Editor",
                           "Add, reorder, edit, reparent, and remove rows — then save a renumbered structure workbook.", color)
 
-        # Sleek responsive toolbar: primary actions stay visible and secondary actions live in More.
+        # Full toolbar: all Structure Editor actions stay visible without an overflow menu.
         toolbar = tk.Frame(self.main_frame, bg=C["bg"], padx=36, pady=12)
         toolbar.pack(fill="x")
 
@@ -1925,36 +1949,20 @@ class DrawingCompilerStudio(tk.Tk):
             btn.pack(side="left", padx=(0, 6))
             return btn
 
-        def register_menu_action(menu, key, label, command):
-            menu.add_command(label=label, command=command)
-            self.reorder_toolbar_buttons[key] = (menu, menu.index("end"))
-
         self.reorder_toolbar_buttons.clear()
-        self.reorder_toolbar_buttons["add_file"] = tool_btn("Add file…", self._reorder_add_file, accent=True)
+        self.reorder_toolbar_buttons["add_file"] = tool_btn("Add file", self._reorder_add_file, accent=True)
         self.reorder_toolbar_buttons["add_item"] = tool_btn("Add item", self._reorder_add_item)
         self.reorder_toolbar_buttons["edit"] = tool_btn("Edit", lambda: self._reorder_edit())
-        self.reorder_toolbar_buttons["save"] = tool_btn("Save as…", self._reorder_save)
-
-        more = tk.Menubutton(
-            toolbar, text="More ▾", bg=C["border"], fg=C["text_dim"],
-            activebackground=C["border_hi"], activeforeground=C["text"],
-            font=(APP_FONT, 9), bd=0, relief="flat", cursor="hand2", padx=12, pady=7,
-        )
-        more_menu = tk.Menu(more, tearoff=False, bg=C["card"], fg=C["text"],
-                            activebackground=C["sel_bg"], activeforeground=C["sel_text"], bd=0)
-        more.configure(menu=more_menu)
-        more.pack(side="left", padx=(4, 0))
-
-        register_menu_action(more_menu, "up", "Move up", lambda: self._reorder_move(-1))
-        register_menu_action(more_menu, "down", "Move down", lambda: self._reorder_move(1))
-        register_menu_action(more_menu, "make_child", "Make child…", self._reorder_make_child)
-        register_menu_action(more_menu, "promote", "Promote", self._reorder_promote)
-        more_menu.add_separator()
-        register_menu_action(more_menu, "expand", "Expand all", lambda: self._reorder_expand(True))
-        register_menu_action(more_menu, "collapse", "Collapse all", lambda: self._reorder_expand(False))
-        more_menu.add_separator()
-        register_menu_action(more_menu, "undo", "Undo", lambda: self._reorder_undo())
-        register_menu_action(more_menu, "remove", "Delete", lambda: self._reorder_remove())
+        self.reorder_toolbar_buttons["up"] = tool_btn("↑", lambda: self._reorder_move(-1))
+        self.reorder_toolbar_buttons["down"] = tool_btn("↓", lambda: self._reorder_move(1))
+        self.reorder_toolbar_buttons["make_child"] = tool_btn("Make child", self._reorder_make_child)
+        self.reorder_toolbar_buttons["promote"] = tool_btn("Promote", self._reorder_promote)
+        self.reorder_toolbar_buttons["expand"] = tool_btn("Expand all", lambda: self._reorder_expand(True))
+        self.reorder_toolbar_buttons["collapse"] = tool_btn("Collapse all", lambda: self._reorder_expand(False))
+        self.reorder_toolbar_buttons["undo"] = tool_btn("↶", lambda: self._reorder_undo())
+        self.reorder_toolbar_buttons["remove"] = tool_btn("⌫", lambda: self._reorder_remove(), danger=True)
+        self.reorder_toolbar_buttons["clear"] = tool_btn("Clear editor", self._reorder_clear_editor, danger=True)
+        self.reorder_toolbar_buttons["save"] = tool_btn("Save as", self._reorder_save)
 
         self.reorder_drag_status_var = tk.StringVar(
             value="Tip: drag rows to reorder them, drop in the middle to make a child, or near the top/bottom edge to place before/after."
@@ -1996,7 +2004,7 @@ class DrawingCompilerStudio(tk.Tk):
         self.reorder_tree.bind("<Delete>", lambda _e: self._reorder_remove())
         self.reorder_tree.bind("<Control-z>", lambda _e: self._reorder_undo())
         self.reorder_tree.bind("<Control-Z>", lambda _e: self._reorder_undo())
-        self.reorder_tree.tag_configure("drop_target", background=C["border_hi"], foreground=C["text"])
+        self.reorder_tree.tag_configure("drop_child", background=C["border_hi"], foreground=C["text"])
         self.reorder_tree.bind("<Return>", lambda _e: self._reorder_edit())
         self.reorder_tree.bind("<ButtonPress-1>", self._reorder_begin_drag)
         self.reorder_tree.bind("<B1-Motion>", self._reorder_drag_motion)
@@ -2024,42 +2032,16 @@ class DrawingCompilerStudio(tk.Tk):
         paths = self._askopenfilenames(filetypes=[("Supported", "*.xlsx *.xlsm *.xls *.csv"), ("All", "*.*")])
         if not paths:
             return
-        new_paths = self._reorder_new_file_paths(paths, duplicate_title="Duplicate file")
-        if not new_paths:
-            return
         try:
             models = []
-            file_types = []
-            for path in new_paths:
+            for path in paths:
                 kind = classify_workbook(path)
-                file_types.append(kind)
                 if kind == "structure":
                     models.append(StructureModel.from_dataframe(load_structure_for_reorder(path)))
                 else:
                     models.append(StructureModel.from_dataframe(cad_export_to_structure_dataframe(path)[0]))
 
-            replace_existing = False
-            if self.reorder_model and self.reorder_model.root.children:
-                choice = messagebox.askyesnocancel(
-                    "Add file",
-                    "Replace the current Structure Editor contents?\n\n"
-                    "Yes = replace with the selected file(s).\n"
-                    "No = append the selected file(s).\n"
-                    "Cancel = do nothing.",
-                    parent=self,
-                )
-                if choice is None:
-                    return
-                replace_existing = bool(choice)
-
-            if replace_existing:
-                self._reorder_snapshot()
-                self.reorder_model = StructureModel()
-                self.reorder_loaded_files.clear()
-                self.reorder_open_state.clear()
-                self.reorder_source_path = new_paths[0] if len(new_paths) == 1 and file_types[0] == "structure" else None
-
-            self._reorder_append_models(models, new_paths)
+            self._reorder_append_models(models, paths)
         except Exception as exc:
             messagebox.showerror("Add file failed", str(exc), parent=self)
 
@@ -2117,10 +2099,8 @@ class DrawingCompilerStudio(tk.Tk):
         if not self.reorder_model:
             messagebox.showwarning("No data", "Open a structure file first.", parent=self)
             return
-        initial = "reordered_structure.xlsx"
-        if self.reorder_source_path:
-            stem = os.path.splitext(os.path.basename(self.reorder_source_path))[0]
-            initial = f"{stem}_reordered.xlsx"
+        template_source = self.reorder_source_path or "structure.xlsx"
+        initial = render_naming_template(self.naming_templates.get("structure_editor"), template_source, ".xlsx")
         path = self._asksaveasfilename(defaultextension=".xlsx", initialfile=initial, filetypes=[("Excel", "*.xlsx")])
         if not path:
             return
@@ -2181,7 +2161,7 @@ class DrawingCompilerStudio(tk.Tk):
         has_model = self.reorder_model is not None
         node = self._reorder_selected_node() if self._reorder_tree_available() else None
         states = {"add_file": "normal"}
-        for key in ["save", "add_item", "expand", "collapse"]:
+        for key in ["save", "add_item", "expand", "collapse", "clear"]:
             states[key] = "normal" if has_model else "disabled"
         for key in ["edit", "remove", "make_child", "promote", "up", "down"]:
             states[key] = "normal" if node else "disabled"
@@ -2228,7 +2208,26 @@ class DrawingCompilerStudio(tk.Tk):
                 self.reorder_tree.item(self.reorder_drag_target_item, tags=())
             except tk.TclError:
                 pass
+        if self.reorder_drop_indicator and self.reorder_drop_indicator.winfo_exists():
+            self.reorder_drop_indicator.place_forget()
         self.reorder_drag_target_item = None
+
+    def _reorder_show_drop_indicator(self, target_item, mode):
+        if not self._reorder_tree_available() or not target_item:
+            return
+        if mode == "inside":
+            self.reorder_drag_target_item = target_item
+            self.reorder_tree.item(target_item, tags=("drop_child",))
+            return
+        bbox = self.reorder_tree.bbox(target_item)
+        if not bbox:
+            return
+        if self.reorder_drop_indicator is None or not self.reorder_drop_indicator.winfo_exists():
+            self.reorder_drop_indicator = tk.Frame(self.reorder_tree, bg=C["accent"], height=2)
+        x, y, width, height = bbox
+        line_y = y if mode == "before" else y + height - 2
+        self.reorder_drop_indicator.place(x=x, y=line_y, width=width, height=2)
+        self.reorder_drag_target_item = target_item
 
     def _reorder_set_drag_status(self, message):
         if self.reorder_drag_status_var is not None:
@@ -2261,8 +2260,7 @@ class DrawingCompilerStudio(tk.Tk):
             return
         _parent, _index, mode, target_node = plan
         if target_item:
-            self.reorder_drag_target_item = target_item
-            self.reorder_tree.item(target_item, tags=("drop_target",))
+            self._reorder_show_drop_indicator(target_item, mode)
         self.reorder_tree.configure(cursor="hand2")
         if mode == "top":
             message = "Drop to move to the bottom of the top level."
@@ -2621,6 +2619,17 @@ class DrawingCompilerStudio(tk.Tk):
         siblings.pop(idx)
         self._reorder_refresh()
 
+    def _reorder_clear_editor(self):
+        if not self.reorder_model:
+            return
+        self._reorder_snapshot()
+        self.reorder_model = StructureModel()
+        self.reorder_source_path = None
+        self.reorder_loaded_files.clear()
+        self.reorder_open_state.clear()
+        self._reorder_refresh()
+        self._reorder_set_drag_status("Editor cleared. Use Undo to restore the previous structure.")
+
     def _reorder_undo(self):
         if not self.reorder_undo_stack:
             return
@@ -2673,27 +2682,59 @@ class DrawingCompilerStudio(tk.Tk):
         structure_var = tk.StringVar()
         output_var = tk.StringVar()
 
-        source_options = []
-        if self.reorder_model and self.reorder_model.root.children:
-            source_options.append("Use current Structure Editor data")
-        option_map = {"Use current Structure Editor data": "__CURRENT_STRUCTURE_EDITOR__"}
+        use_editor_var = tk.BooleanVar(value=False)
+        editor_available = bool(self.reorder_model and self.reorder_model.root.children)
 
         row_frame = tk.Frame(card, bg=C["card"])
         row_frame.pack(fill="x", pady=(0, 14))
-        tk.Label(row_frame, text="Structure workbook or CAD export", bg=C["card"], fg=C["text_dim"],
-                 font=(APP_FONT, 9), anchor="w").pack(fill="x", pady=(0, 4))
+
         input_row = tk.Frame(row_frame, bg=C["card"])
-        input_row.pack(fill="x")
-        source_combo = ttk.Combobox(input_row, textvariable=structure_var, values=source_options, font=(MONO_FONT, 9))
-        source_combo.pack(side="left", fill="x", expand=True, ipady=5)
 
         def browse_reference_input():
             path = self._askopenfilename(filetypes=[("Supported", "*.xlsx *.xlsm *.xls *.csv"), ("All", "*.*")])
             if path:
                 structure_var.set(path)
+                if not output_var.get().strip():
+                    output_var.set(default_output_path(path, "_drawings", "", self.naming_templates.get("drawing_download_folder")))
 
+        def update_reference_source_state(*_):
+            using_editor = use_editor_var.get()
+            if using_editor:
+                structure_var.set("__CURRENT_STRUCTURE_EDITOR__")
+            elif structure_var.get() == "__CURRENT_STRUCTURE_EDITOR__":
+                structure_var.set("")
+            state = "disabled" if using_editor else "normal"
+            source_entry.configure(
+                state=state,
+                disabledbackground=C["border"],
+                disabledforeground=C["text_muted"],
+            )
+            browse.configure(state=state, cursor=("arrow" if using_editor else "hand2"))
+
+        editor_check = tk.Checkbutton(
+            row_frame, text="Use Structure Editor structure", variable=use_editor_var,
+            command=update_reference_source_state,
+            bg=C["card"], fg=C["text_dim"], selectcolor=C["surface"],
+            activebackground=C["card"], activeforeground=C["text"],
+            disabledforeground=C["text_muted"], font=(APP_FONT, 10),
+            bd=0, highlightthickness=0, anchor="w",
+            state=("normal" if editor_available else "disabled"),
+        )
+        editor_check.pack(fill="x", pady=(0, 8))
+        tk.Label(row_frame, text="Structure workbook or CAD export", bg=C["card"], fg=C["text_dim"],
+                 font=(APP_FONT, 9), anchor="w").pack(fill="x", pady=(0, 4))
+        input_row.pack(fill="x")
+        source_entry = tk.Entry(
+            input_row, textvariable=structure_var, bg=C["bg"], fg=C["text"],
+            insertbackground=C["text"], selectbackground=C["accent_muted"],
+            selectforeground=C["text"], font=(MONO_FONT, 9), bd=0,
+            highlightthickness=1, highlightbackground=C["border"],
+            highlightcolor=C["accent"], relief="flat",
+        )
+        source_entry.pack(side="left", fill="x", expand=True, ipady=7, ipadx=8)
         browse = self._small_btn(input_row, "Browse…", browse_reference_input)
         browse.pack(side="left", padx=(8, 0))
+        update_reference_source_state()
 
         self._divider(card)
         self._section_label(card, "Output")
@@ -2703,14 +2744,13 @@ class DrawingCompilerStudio(tk.Tk):
 
         def run():
             if not structure_var.get() or not output_var.get():
-                messagebox.showwarning("Missing fields", "Choose structure file and output folder.", parent=self)
+                messagebox.showwarning("Missing fields", "Choose a structure source and output folder.", parent=self)
                 return
             progress = ProgressDialog(self, "Downloading Drawings")
             result = None
             error = None
             try:
-                selected_input = option_map.get(structure_var.get(), structure_var.get())
-                structure_path, input_kind = self._prepare_reference_input(selected_input)
+                structure_path, input_kind = self._prepare_reference_input(structure_var.get())
                 result = download_references(structure_path, output_var.get(), progress_callback=progress.update)
                 result["input_kind"] = input_kind
             except Exception as exc:
@@ -2772,53 +2812,75 @@ class DrawingCompilerStudio(tk.Tk):
             "Browse folder…",
         )
 
+        self._divider(card)
+        self._section_label(card, "Default naming templates")
+        tk.Label(
+            card,
+            text="Use {base} for the selected input filename, {ext} for the extension without a dot, and {extension} for the extension with a dot.",
+            bg=C["card"], fg=C["text_muted"], font=(APP_FONT, 9), justify="left", anchor="w", wraplength=820,
+        ).pack(fill="x", pady=(0, 10))
+
+        template_vars = {}
+        template_labels = [
+            ("manual_packet", "Manual packet PDF"),
+            ("automated_packet", "Automated packet PDF"),
+            ("structure_export", "CAD-to-structure workbook"),
+            ("structure_editor", "Structure Editor save workbook"),
+            ("drawing_download_folder", "Drawing download folder"),
+        ]
+        for key, label in template_labels:
+            template_vars[key] = tk.StringVar(value=self.naming_templates.get(key, DEFAULT_NAMING_TEMPLATES[key]))
+            tk.Label(card, text=label, bg=C["card"], fg=C["text_dim"],
+                     font=(APP_FONT, 9), anchor="w").pack(fill="x", pady=(0, 4))
+            tk.Entry(
+                card, textvariable=template_vars[key], bg=C["bg"], fg=C["text"],
+                insertbackground=C["text"], selectbackground=C["accent_muted"],
+                selectforeground=C["text"], font=(MONO_FONT, 9), bd=0,
+                highlightthickness=1, highlightbackground=C["border"],
+                highlightcolor=C["accent"], relief="flat",
+            ).pack(fill="x", pady=(0, 12), ipady=7, ipadx=8)
+
         btn_row = tk.Frame(card, bg=C["card"])
         btn_row.pack(fill="x")
 
-        def save_directory():
+        def save_settings():
             path = directory_var.get().strip()
             if path and not os.path.isdir(path):
                 messagebox.showerror("Invalid directory", "Choose an existing folder.", parent=self)
                 return
+            cleaned_templates = {}
+            for key, var in template_vars.items():
+                value = var.get().strip()
+                if not value:
+                    messagebox.showerror("Invalid template", "Naming templates cannot be blank.", parent=self)
+                    return
+                cleaned_templates[key] = value
             self.default_directory = path
             self.last_folder = path or self.last_folder
+            self.naming_templates = cleaned_templates
             self._save_config()
-            self._show_themed_dialog("Settings saved", "Your default directory preference has been saved.", tone="info")
+            self._show_themed_dialog("Settings saved", "Your preferences and output naming templates have been saved.", tone="info")
 
-        save_btn = self._run_btn(btn_row, "Save Settings", save_directory, color)
+        save_btn = self._run_btn(btn_row, "Save Settings", save_settings, color)
         save_btn.pack(anchor="w")
-
-        suggestions = self._card(main)
-        self._section_label(suggestions, "Suggested settings to add next")
-        tk.Label(
-            suggestions,
-            text=(
-                "• Remember the last workflow and selected input/output files so the dashboard can offer Continue last workflow.\n"
-                "• Add default output naming templates for packets, structure exports, and download folders.\n"
-                "• Store preferred hydraulic schematic PDF and drawing download folder.\n"
-                "• Add validation preferences, such as warning before overwriting existing output files.\n"
-                "• Add network settings for the print lookup service URL and timeout."
-            ),
-            bg=C["card"], fg=C["text_dim"], font=(APP_FONT, 10), justify="left", anchor="w", wraplength=760,
-        ).pack(fill="x")
 
     # ── Shared file browse helper ─────────────────────────────────────────────
 
-    def _browse_file(self, input_var, output_var, suffix, ext, filetypes):
+    def _browse_file(self, input_var, output_var, suffix, ext, filetypes, template_key=None):
         path = self._askopenfilename(filetypes=filetypes)
         if not path:
             return
         input_var.set(path)
         if not output_var.get().strip():
-            output_var.set(default_output_path(path, suffix, ext))
+            output_var.set(default_output_path(path, suffix, ext, self.naming_templates.get(template_key)))
 
-    def _browse_files(self, input_var, output_var, suffix, ext, filetypes):
+    def _browse_files(self, input_var, output_var, suffix, ext, filetypes, template_key=None):
         paths = self._askopenfilenames(filetypes=filetypes)
         if not paths:
             return
         input_var.set("; ".join(paths))
         if not output_var.get().strip():
-            output_var.set(default_output_path(paths[0], suffix, ext))
+            output_var.set(default_output_path(paths[0], suffix, ext, self.naming_templates.get(template_key)))
 
 
 def main():
