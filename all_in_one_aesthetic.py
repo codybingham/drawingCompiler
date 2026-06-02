@@ -1026,6 +1026,63 @@ def make_hover_color(base_hex, lighten=20):
     return f"#{r:02x}{g:02x}{b:02x}"
 
 
+
+
+class ToolTip:
+    def __init__(self, widget, text, delay=500):
+        self.widget = widget
+        self.text = text
+        self.delay = delay
+        self._after_id = None
+        self._tip = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _schedule(self, _event=None):
+        self._cancel()
+        self._after_id = self.widget.after(self.delay, self._show)
+
+    def _cancel(self):
+        if self._after_id:
+            try:
+                self.widget.after_cancel(self._after_id)
+            except tk.TclError:
+                pass
+            self._after_id = None
+
+    def _show(self):
+        if self._tip or not self.text:
+            return
+        try:
+            x = self.widget.winfo_rootx() + 12
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + 8
+        except tk.TclError:
+            return
+        self._tip = tk.Toplevel(self.widget)
+        self._tip.wm_overrideredirect(True)
+        self._tip.wm_geometry(f"+{x}+{y}")
+        label = tk.Label(
+            self._tip, text=self.text, bg=C["surface"], fg=C["text"],
+            bd=0, padx=8, pady=5, font=(APP_FONT, 9),
+            highlightthickness=1, highlightbackground=C["border_hi"],
+        )
+        label.pack()
+
+    def _hide(self, _event=None):
+        self._cancel()
+        if self._tip:
+            try:
+                self._tip.destroy()
+            except tk.TclError:
+                pass
+            self._tip = None
+
+
+def add_tooltip(widget, text):
+    widget._tooltip = ToolTip(widget, text)
+    return widget
+
 # ─── Progress Dialog ──────────────────────────────────────────────────────────
 
 class ProgressDialog:
@@ -1111,7 +1168,12 @@ class DrawingCompilerStudio(tk.Tk):
         self.reorder_open_state: dict[tuple[str, str], bool] = {}
         self.reorder_loaded_files: set[str] = set()
         self.reorder_toolbar_buttons: dict[str, object] = {}
-        self.reorder_undo_stack: list[tuple] = []
+        self.reorder_toolbar_actions: dict[str, dict] = {}
+        self.reorder_toolbar_layout_items: list[dict] = []
+        self.reorder_more_button: tk.Button | None = None
+        self.reorder_more_menu: tk.Menu | None = None
+        self.reorder_undo_stack: list[pd.DataFrame] = []
+        self.reorder_redo_stack: list[pd.DataFrame] = []
         self.reorder_drag_item: str | None = None
         self.reorder_drag_target_item: str | None = None
         self.reorder_drop_indicator: tk.Frame | None = None
@@ -1478,6 +1540,10 @@ class DrawingCompilerStudio(tk.Tk):
         self.reorder_drag_item = None
         self.reorder_drag_target_item = None
         self.reorder_drag_status_var = None
+        self.reorder_toolbar_actions = {}
+        self.reorder_toolbar_layout_items = []
+        self.reorder_more_button = None
+        self.reorder_more_menu = None
 
     def _push(self):
         self.history.append(self.current)
@@ -1636,7 +1702,7 @@ class DrawingCompilerStudio(tk.Tk):
         btn = tk.Button(
             parent, text=f"  {text}  ", command=command,
             bg=bg, fg="#FFFFFF",
-            activebackground=hover, activeforeground="#FFFFFF",
+            activebackground=hover, activeforeground="#FFFFFF", disabledforeground="#FFFFFF",
             font=(APP_FONT, 10, "bold"), bd=0, relief="flat",
             cursor="hand2", padx=16, pady=9,
         )
@@ -1926,11 +1992,30 @@ class DrawingCompilerStudio(tk.Tk):
         self._page_header(header_frame, "Structure Editor",
                           "Add, reorder, edit, reparent, and remove rows — then save a renumbered structure workbook.", color)
 
-        # Full toolbar: all Structure Editor actions stay visible without an overflow menu.
+        # Responsive toolbar: keep actions in order and move spillover into More.
         toolbar = tk.Frame(self.main_frame, bg=C["bg"], padx=36, pady=12)
         toolbar.pack(fill="x")
 
-        def tool_btn(text, cmd, accent=False, danger=False):
+        def show_more_menu():
+            if not self.reorder_more_menu or not self.reorder_more_button:
+                return
+            self.reorder_more_menu.tk_popup(
+                self.reorder_more_button.winfo_rootx(),
+                self.reorder_more_button.winfo_rooty() + self.reorder_more_button.winfo_height(),
+            )
+
+        self.reorder_more_menu = tk.Menu(toolbar, tearoff=False, bg=C["surface"], fg=C["text"],
+                                         activebackground=C["border_hi"], activeforeground=C["text"], bd=0)
+        self.reorder_more_button = tk.Button(
+            toolbar, text="More ▾", command=show_more_menu,
+            bg=C["border"], fg=C["text_dim"], activebackground=C["border_hi"], activeforeground=C["text"],
+            font=(APP_FONT, 9, "bold"), bd=0, relief="flat", cursor="hand2", padx=12, pady=7,
+        )
+        self.reorder_more_button.bind("<Enter>", lambda e: self.reorder_more_button.configure(bg=C["border_hi"], fg=C["text"]))
+        self.reorder_more_button.bind("<Leave>", lambda e: self.reorder_more_button.configure(bg=C["border"], fg=C["text_dim"]))
+        add_tooltip(self.reorder_more_button, "Show toolbar actions that do not fit on screen.")
+
+        def tool_btn(text, cmd, tooltip, accent=False, danger=False):
             if danger:
                 bg, fg, hover = C["danger_muted"], C["danger"], C["danger"]
             elif accent:
@@ -1946,31 +2031,43 @@ class DrawingCompilerStudio(tk.Tk):
             )
             btn.bind("<Enter>", lambda e: btn.configure(bg=hover, fg="#fff" if (accent or danger) else C["text"]))
             btn.bind("<Leave>", lambda e: btn.configure(bg=bg, fg=fg))
-            btn.pack(side="left", padx=(0, 6))
+            add_tooltip(btn, tooltip)
             return btn
 
-        self.reorder_toolbar_buttons.clear()
-        self.reorder_toolbar_buttons["add_file"] = tool_btn("Add file", self._reorder_add_file, accent=True)
-        self.reorder_toolbar_buttons["add_item"] = tool_btn("Add item", self._reorder_add_item)
-        self.reorder_toolbar_buttons["edit"] = tool_btn("Edit", lambda: self._reorder_edit())
-        self.reorder_toolbar_buttons["up"] = tool_btn("↑", lambda: self._reorder_move(-1))
-        self.reorder_toolbar_buttons["down"] = tool_btn("↓", lambda: self._reorder_move(1))
-        self.reorder_toolbar_buttons["make_child"] = tool_btn("Make child", self._reorder_make_child)
-        self.reorder_toolbar_buttons["promote"] = tool_btn("Promote", self._reorder_promote)
-        self.reorder_toolbar_buttons["expand"] = tool_btn("Expand all", lambda: self._reorder_expand(True))
-        self.reorder_toolbar_buttons["collapse"] = tool_btn("Collapse all", lambda: self._reorder_expand(False))
-        self.reorder_toolbar_buttons["undo"] = tool_btn("↶", lambda: self._reorder_undo())
-        self.reorder_toolbar_buttons["remove"] = tool_btn("⌫", lambda: self._reorder_remove(), danger=True)
-        self.reorder_toolbar_buttons["clear"] = tool_btn("Clear editor", self._reorder_clear_editor, danger=True)
-        self.reorder_toolbar_buttons["save"] = tool_btn("Save as", self._reorder_save)
+        action_specs = [
+            ("add_file", "Add file", self._reorder_add_file, "Add one or more structure or CAD export files to the editor.", True, False),
+            ("save", "Save structure", self._reorder_save, "Save the current editor structure as a workbook.", False, False),
+            (None, None, None, None, None, None),
+            ("up", "Up", lambda: self._reorder_move(-1), "Move the selected row up among its siblings.", False, False),
+            ("down", "Down", lambda: self._reorder_move(1), "Move the selected row down among its siblings.", False, False),
+            ("make_child", "Make child", self._reorder_make_child, "Move the selected row under a new parent.", False, False),
+            ("promote", "Promote", self._reorder_promote, "Move the selected row up one level.", False, False),
+            (None, None, None, None, None, None),
+            ("expand", "Expand all", lambda: self._reorder_expand(True), "Open every row in the structure tree.", False, False),
+            ("collapse", "Collapse all", lambda: self._reorder_expand(False), "Close every row in the structure tree.", False, False),
+            (None, None, None, None, None, None),
+            ("undo", "Undo", self._reorder_undo, "Undo the last editor change.", False, False),
+            ("redo", "Redo", self._reorder_redo, "Redo the last undone editor change.", False, False),
+            (None, None, None, None, None, None),
+            ("clear", "Clear editor", self._reorder_clear_editor, "Remove all rows from the Structure Editor.", False, True),
+        ]
 
-        self.reorder_drag_status_var = tk.StringVar(
-            value="Tip: drag rows to reorder them, drop in the middle to make a child, or near the top/bottom edge to place before/after."
-        )
-        tk.Label(
-            toolbar, textvariable=self.reorder_drag_status_var, bg=C["bg"], fg=C["text_muted"],
-            font=(APP_FONT, 9), anchor="w",
-        ).pack(side="left", fill="x", expand=True, padx=(16, 0))
+        self.reorder_toolbar_buttons.clear()
+        self.reorder_toolbar_actions.clear()
+        self.reorder_toolbar_layout_items.clear()
+        for spec in action_specs:
+            key, text, cmd, tooltip, accent, danger = spec
+            if key is None:
+                sep = tk.Frame(toolbar, bg=C["border"], width=1, height=22)
+                self.reorder_toolbar_layout_items.append({"kind": "separator", "widget": sep})
+                continue
+            btn = tool_btn(text, cmd, tooltip, accent=accent, danger=danger)
+            action = {"key": key, "text": text, "command": cmd, "tooltip": tooltip, "button": btn, "state": "normal"}
+            self.reorder_toolbar_actions[key] = action
+            self.reorder_toolbar_buttons[key] = action
+            self.reorder_toolbar_layout_items.append({"kind": "action", "key": key, "widget": btn})
+
+        toolbar.bind("<Configure>", lambda _e: self._layout_reorder_toolbar(toolbar))
 
         # Tree area
         tree_frame = tk.Frame(self.main_frame, bg=C["bg"], padx=36)
@@ -2004,12 +2101,81 @@ class DrawingCompilerStudio(tk.Tk):
         self.reorder_tree.bind("<Delete>", lambda _e: self._reorder_remove())
         self.reorder_tree.bind("<Control-z>", lambda _e: self._reorder_undo())
         self.reorder_tree.bind("<Control-Z>", lambda _e: self._reorder_undo())
+        self.reorder_tree.bind("<Control-y>", lambda _e: self._reorder_redo())
+        self.reorder_tree.bind("<Control-Y>", lambda _e: self._reorder_redo())
         self.reorder_tree.tag_configure("drop_child", background=C["border_hi"], foreground=C["text"])
         self.reorder_tree.bind("<Return>", lambda _e: self._reorder_edit())
         self.reorder_tree.bind("<ButtonPress-1>", self._reorder_begin_drag)
         self.reorder_tree.bind("<B1-Motion>", self._reorder_drag_motion)
         self.reorder_tree.bind("<ButtonRelease-1>", self._reorder_drop)
-        self._reorder_update_button_states()
+        self._reorder_refresh()
+        self._layout_reorder_toolbar(toolbar)
+
+    def _layout_reorder_toolbar(self, toolbar):
+        if not self.reorder_toolbar_layout_items or not self.reorder_more_button:
+            return
+        toolbar.update_idletasks()
+        for item in self.reorder_toolbar_layout_items:
+            item["widget"].pack_forget()
+        self.reorder_more_button.pack_forget()
+
+        available = max(toolbar.winfo_width() - 72, 100)
+        more_width = self.reorder_more_button.winfo_reqwidth() + 10
+        used = 0
+        visible_items = []
+        overflow_items = []
+        for item in self.reorder_toolbar_layout_items:
+            widget = item["widget"]
+            width = widget.winfo_reqwidth() + (18 if item["kind"] == "separator" else 6)
+            remaining_actions = any(i["kind"] == "action" for i in self.reorder_toolbar_layout_items[self.reorder_toolbar_layout_items.index(item) + 1:])
+            reserve = more_width if remaining_actions else 0
+            if used + width + reserve <= available:
+                visible_items.append(item)
+                used += width
+            else:
+                overflow_items.append(item)
+
+        while visible_items and visible_items[-1]["kind"] == "separator":
+            overflow_items.insert(0, visible_items.pop())
+        while overflow_items and overflow_items[0]["kind"] == "separator":
+            overflow_items.pop(0)
+
+        for item in visible_items:
+            if item["kind"] == "separator":
+                item["widget"].pack(side="left", padx=(6, 12), pady=6, fill="y")
+            else:
+                item["widget"].pack(side="left", padx=(0, 6))
+
+        self._rebuild_reorder_more_menu(overflow_items)
+        if any(item["kind"] == "action" for item in overflow_items):
+            self.reorder_more_button.pack(side="left", padx=(2, 0))
+
+    def _rebuild_reorder_more_menu(self, overflow_items):
+        if not self.reorder_more_menu:
+            return
+        self.reorder_more_menu.delete(0, "end")
+        previous_was_separator = True
+        added_action = False
+        for item in overflow_items:
+            if item["kind"] == "separator":
+                if added_action and not previous_was_separator:
+                    self.reorder_more_menu.add_separator()
+                    previous_was_separator = True
+                continue
+            action = self.reorder_toolbar_actions[item["key"]]
+            self.reorder_more_menu.add_command(
+                label=action["text"], command=action["command"], state=action.get("state", "normal")
+            )
+            previous_was_separator = False
+            added_action = True
+        last_index = self.reorder_more_menu.index("end")
+        if last_index is not None:
+            try:
+                while last_index is not None and self.reorder_more_menu.type(last_index) == "separator":
+                    self.reorder_more_menu.delete(last_index)
+                    last_index = self.reorder_more_menu.index("end")
+            except tk.TclError:
+                pass
 
     def _reorder_open(self):
         path = self._askopenfilename(filetypes=[("Excel", "*.xlsx *.xlsm *.xls"), ("All", "*.*")])
@@ -2022,6 +2188,7 @@ class DrawingCompilerStudio(tk.Tk):
             self.reorder_loaded_files = {os.path.abspath(path)}
             self.reorder_open_state.clear()
             self.reorder_undo_stack.clear()
+            self.reorder_redo_stack.clear()
             if not self._reorder_tree_available():
                 self.show_workflow("reorder_structure", add_history=False)
             self._reorder_refresh()
@@ -2151,9 +2318,17 @@ class DrawingCompilerStudio(tk.Tk):
                     break
         self._reorder_update_button_states()
 
-    def _reorder_snapshot(self):
-        if self.reorder_model and self.reorder_model.root.children:
+    def _reorder_snapshot(self, clear_redo=True):
+        if self.reorder_model is not None:
             self.reorder_undo_stack.append(self.reorder_model.to_dataframe())
+        if clear_redo:
+            self.reorder_redo_stack.clear()
+
+    def _reorder_restore_dataframe(self, df):
+        if df.empty:
+            self.reorder_model = StructureModel()
+        else:
+            self.reorder_model = StructureModel.from_dataframe(df)
 
     def _reorder_update_button_states(self):
         if not self.reorder_toolbar_buttons:
@@ -2161,11 +2336,12 @@ class DrawingCompilerStudio(tk.Tk):
         has_model = self.reorder_model is not None
         node = self._reorder_selected_node() if self._reorder_tree_available() else None
         states = {"add_file": "normal"}
-        for key in ["save", "add_item", "expand", "collapse", "clear"]:
+        for key in ["save", "expand", "collapse", "clear"]:
             states[key] = "normal" if has_model else "disabled"
-        for key in ["edit", "remove", "make_child", "promote", "up", "down"]:
+        for key in ["make_child", "promote", "up", "down"]:
             states[key] = "normal" if node else "disabled"
         states["undo"] = "normal" if self.reorder_undo_stack else "disabled"
+        states["redo"] = "normal" if self.reorder_redo_stack else "disabled"
         if node and node.parent:
             siblings = node.parent.children
             idx = siblings.index(node)
@@ -2178,6 +2354,12 @@ class DrawingCompilerStudio(tk.Tk):
             self._set_reorder_action_state(control, state)
 
     def _set_reorder_action_state(self, control, state):
+        if isinstance(control, dict):
+            control["state"] = state
+            button = control.get("button")
+            if button and button.winfo_exists():
+                button.configure(state=state, cursor=("hand2" if state == "normal" else "arrow"))
+            return
         if isinstance(control, tuple):
             menu, index = control
             try:
@@ -2633,8 +2815,19 @@ class DrawingCompilerStudio(tk.Tk):
     def _reorder_undo(self):
         if not self.reorder_undo_stack:
             return
+        if self.reorder_model is not None:
+            self.reorder_redo_stack.append(self.reorder_model.to_dataframe())
         df = self.reorder_undo_stack.pop()
-        self.reorder_model = StructureModel.from_dataframe(df)
+        self._reorder_restore_dataframe(df)
+        self._reorder_refresh()
+
+    def _reorder_redo(self):
+        if not self.reorder_redo_stack:
+            return
+        if self.reorder_model is not None:
+            self.reorder_undo_stack.append(self.reorder_model.to_dataframe())
+        df = self.reorder_redo_stack.pop()
+        self._reorder_restore_dataframe(df)
         self._reorder_refresh()
 
     def _reorder_expand(self, expand):
@@ -2786,20 +2979,21 @@ class DrawingCompilerStudio(tk.Tk):
 
         card = self._card(main)
         self._section_label(card, "Appearance")
-        theme_var = tk.StringVar(value=self.theme_name)
         theme_row = tk.Frame(card, bg=C["card"])
         theme_row.pack(fill="x", pady=(0, 14))
         tk.Label(theme_row, text="Theme", bg=C["card"], fg=C["text_dim"],
                  font=(APP_FONT, 9), anchor="w").pack(fill="x", pady=(0, 8))
-        for value, label in [("dark", "Dark mode"), ("light", "Light mode")]:
-            rb = tk.Radiobutton(
-                theme_row, text=label, variable=theme_var, value=value,
-                command=lambda v=value: self._set_theme(v),
-                bg=C["card"], fg=C["text_dim"], selectcolor=C["surface"],
-                activebackground=C["card"], activeforeground=C["text"],
-                font=(APP_FONT, 10), bd=0, highlightthickness=0,
-            )
-            rb.pack(side="left", padx=(0, 18))
+        current_label = "Dark mode" if self.theme_name == "dark" else "Light mode"
+        next_theme = "light" if self.theme_name == "dark" else "dark"
+        next_label = "Switch to light mode" if next_theme == "light" else "Switch to dark mode"
+        tk.Label(
+            theme_row, text=f"Current theme: {current_label}", bg=C["card"], fg=C["text"],
+            font=(APP_FONT, 10, "bold"), anchor="w",
+        ).pack(side="left", padx=(0, 14))
+        toggle = self._small_btn(theme_row, next_label, lambda: self._set_theme(next_theme), C["accent_muted"])
+        toggle.configure(fg=C["accent"], activeforeground="#FFFFFF")
+        toggle.pack(side="left")
+        add_tooltip(toggle, "Toggle between the light and dark application themes.")
 
         self._divider(card)
         self._section_label(card, "Default directory")
