@@ -1165,7 +1165,7 @@ class DrawingCompilerStudio(tk.Tk):
         self.reorder_tree: ttk.Treeview | None = None
         self.reorder_source_path: str | None = None
         self.reorder_item_lookup: dict[str, StructureNode] = {}
-        self.reorder_open_state: dict[tuple[str, str], bool] = {}
+        self.reorder_open_state: dict[tuple[str, str, str], bool] = {}
         self.reorder_loaded_files: set[str] = set()
         self.reorder_toolbar_buttons: dict[str, object] = {}
         self.reorder_toolbar_actions: dict[str, dict] = {}
@@ -1534,9 +1534,16 @@ class DrawingCompilerStudio(tk.Tk):
     # ── Navigation ────────────────────────────────────────────────────────────
 
     def _clear_main(self):
+        # Preserve the Structure Editor tree expansion state before destroying
+        # the current workflow page.  The data model intentionally lives across
+        # workflow changes, but Treeview item IDs are widget-local; clear the
+        # lookup after teardown so the next Structure Editor page cannot query
+        # stale IDs from the destroyed tree.
+        self._remember_reorder_open_state()
         for child in self.main_frame.winfo_children():
             child.destroy()
         self.reorder_tree = None
+        self.reorder_item_lookup.clear()
         self.reorder_drag_item = None
         self.reorder_drag_target_item = None
         self.reorder_drag_status_var = None
@@ -2283,7 +2290,10 @@ class DrawingCompilerStudio(tk.Tk):
     def _remember_reorder_open_state(self):
         if not self._reorder_tree_available():
             return
-        for item_id, node in self.reorder_item_lookup.items():
+        for item_id, node in list(self.reorder_item_lookup.items()):
+            if not self.reorder_tree.exists(item_id):
+                self.reorder_item_lookup.pop(item_id, None)
+                continue
             self.reorder_open_state[self._node_state_key(node)] = bool(self.reorder_tree.item(item_id, "open"))
 
     def _reorder_refresh(self, select_node=None):
