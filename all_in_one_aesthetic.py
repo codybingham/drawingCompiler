@@ -5,7 +5,7 @@ import tempfile
 import tkinter as tk
 from io import BytesIO
 from dataclasses import dataclass
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import Callable
 
 import pandas as pd
@@ -195,6 +195,22 @@ def build_hierarchy(entries: list[dict]) -> list[dict]:
 
 def is_hydraulic_schematic_entry(description: str) -> bool:
     return str(description).strip().upper().startswith("HYDRAULIC SCHEMATIC")
+
+
+def machine_name_from_schematic_path(schematic_pdf: str | None) -> str:
+    if not schematic_pdf:
+        return ""
+    stem = os.path.splitext(os.path.basename(str(schematic_pdf)))[0]
+    return re.sub(r"\s+", " ", stem.replace("_", " ")).strip()
+
+
+def table_of_contents_title(schematic_pdf: str | None = None, document_name: str | None = None) -> str:
+    machine_name = machine_name_from_schematic_path(schematic_pdf)
+    if not machine_name and document_name:
+        machine_name = str(document_name).strip()
+    if machine_name:
+        return f"Table of Contents - {machine_name}"
+    return "Table of Contents"
 
 
 def _build_index_entries(entries: list[dict]) -> list[dict]:
@@ -688,7 +704,7 @@ def _find_pdf_for_part(folder, part_number):
     return None
 
 
-def build_manual_packet(structure_path, drawings_folder, output_pdf, schematic_pdf=None, progress_callback=None):
+def build_manual_packet(structure_path, drawings_folder, output_pdf, schematic_pdf=None, document_name=None, progress_callback=None):
     df = pd.read_excel(structure_path)
     level_col = find_column(df, ["Level"])
     desc_col = find_column(df, ["Description", "Name"])
@@ -742,7 +758,8 @@ def build_manual_packet(structure_path, drawings_folder, output_pdf, schematic_p
         entry["toc_index"] = toc_index
     index_entries = _build_index_entries(existing_entries)
     toc_entries = existing_entries + [{"desc": "Index", "part": "", "item_number": "", "indent_level": 0}]
-    toc_packet, _ = create_directory_pdf_bytes(toc_entries, "Table of Contents")
+    toc_title = table_of_contents_title(schematic_pdf if schematic_pdf and os.path.exists(schematic_pdf) else None, document_name)
+    toc_packet, _ = create_directory_pdf_bytes(toc_entries, toc_title)
     toc_pages = len(PdfReader(toc_packet).pages)
     page_offset_map = []
     current_page = toc_pages
@@ -752,7 +769,7 @@ def build_manual_packet(structure_path, drawings_folder, output_pdf, schematic_p
         current_page += len(reader.pages)
     index_start_page = current_page
     toc_page_map = page_offset_map + [index_start_page]
-    toc_packet, toc_placements = create_directory_pdf_bytes(toc_entries, "Table of Contents", toc_page_map)
+    toc_packet, toc_placements = create_directory_pdf_bytes(toc_entries, toc_title, toc_page_map)
     for entry in index_entries:
         pages = []
         for toc_index in entry["toc_indices"]:
@@ -804,7 +821,7 @@ def split_path_list(paths_text: str | list[str]) -> list[str]:
     return [p.strip() for p in str(paths_text).split(";") if p.strip()]
 
 
-def build_automated_packet(input_paths, schematic_pdf, temp_download_folder, output_pdf, progress_callback=None):
+def build_automated_packet(input_paths, schematic_pdf, temp_download_folder, output_pdf, document_name=None, progress_callback=None):
     paths = split_path_list(input_paths)
     if not paths:
         raise ValueError("Choose a CAD export or structure workbook.")
@@ -833,7 +850,7 @@ def build_automated_packet(input_paths, schematic_pdf, temp_download_folder, out
 
     packet_result = build_manual_packet(
         structure_path, temp_download_folder, output_pdf,
-        schematic_pdf=schematic_pdf, progress_callback=phase_build,
+        schematic_pdf=schematic_pdf, document_name=document_name, progress_callback=phase_build,
     )
     return {
         "output_pdf": packet_result["output_pdf"],
@@ -1829,6 +1846,9 @@ class DrawingCompilerStudio(tk.Tk):
             if not structure_var.get() or not drawings_var.get() or not output_var.get():
                 messagebox.showwarning("Missing fields", "Please fill in Structure workbook, Drawings folder, and Output PDF.", parent=self)
                 return
+            document_name = self._prompt_document_name_if_no_schematic(schematic_var.get())
+            if document_name is None:
+                return
             try:
                 validate_output_filename(output_var.get())
             except ValueError as exc:
@@ -1841,6 +1861,7 @@ class DrawingCompilerStudio(tk.Tk):
                 result = build_manual_packet(
                     structure_var.get(), drawings_var.get(), output_var.get(),
                     schematic_pdf=schematic_var.get().strip() or None,
+                    document_name=document_name,
                     progress_callback=progress.update,
                 )
             except Exception as exc:
@@ -1886,7 +1907,8 @@ class DrawingCompilerStudio(tk.Tk):
                                                "automated_packet"))
         self._field(card, "Hydraulic schematic PDF", schematic_var,
                     lambda: schematic_var.set(
-                        self._askopenfilename(filetypes=[("PDF", "*.pdf"), ("All", "*.*")]) or schematic_var.get()))
+                        self._askopenfilename(filetypes=[("PDF", "*.pdf"), ("All", "*.*")]) or schematic_var.get()),
+                    optional=True)
         self._field(card, "Download folder", download_var,
                     lambda: download_var.set(self._askdirectory() or download_var.get()),
                     "Browse folder…")
@@ -1899,8 +1921,11 @@ class DrawingCompilerStudio(tk.Tk):
                     "Save as…")
 
         def run():
-            if not cad_var.get() or not schematic_var.get() or not download_var.get() or not output_var.get():
-                messagebox.showwarning("Missing fields", "All four fields are required.", parent=self)
+            if not cad_var.get() or not download_var.get() or not output_var.get():
+                messagebox.showwarning("Missing fields", "Please fill in CAD export(s) or structure workbook, Download folder, and Output PDF.", parent=self)
+                return
+            document_name = self._prompt_document_name_if_no_schematic(schematic_var.get())
+            if document_name is None:
                 return
             try:
                 validate_output_filename(output_var.get())
@@ -1912,8 +1937,9 @@ class DrawingCompilerStudio(tk.Tk):
             error = None
             try:
                 result = build_automated_packet(
-                    cad_var.get(), schematic_var.get(),
+                    cad_var.get(), schematic_var.get().strip() or None,
                     download_var.get(), output_var.get(),
+                    document_name=document_name,
                     progress_callback=progress.update,
                 )
             except Exception as exc:
@@ -1941,7 +1967,7 @@ class DrawingCompilerStudio(tk.Tk):
         self._divider(card)
         run_btn = self._run_btn(card, "Run Automated Build", run, color)
         run_btn.pack(anchor="w")
-        self._bind_enabled_state(run_btn, [cad_var, schematic_var, download_var, output_var])
+        self._bind_enabled_state(run_btn, [cad_var, download_var, output_var])
 
     # ── CAD to Structure ──────────────────────────────────────────────────────
 
@@ -3093,6 +3119,22 @@ class DrawingCompilerStudio(tk.Tk):
 
         save_btn = self._run_btn(btn_row, "Save Settings", save_settings, color)
         save_btn.pack(anchor="w")
+
+    def _prompt_document_name_if_no_schematic(self, schematic_path):
+        if schematic_path and os.path.exists(schematic_path):
+            return ""
+        document_name = simpledialog.askstring(
+            "Document name required",
+            "No hydraulic schematic was selected. Enter the document name for the table of contents:",
+            parent=self,
+        )
+        if document_name is None:
+            return None
+        document_name = document_name.strip()
+        if not document_name:
+            messagebox.showwarning("Missing document name", "Please enter a document name when no hydraulic schematic is selected.", parent=self)
+            return None
+        return document_name
 
     # ── Shared file browse helper ─────────────────────────────────────────────
 
